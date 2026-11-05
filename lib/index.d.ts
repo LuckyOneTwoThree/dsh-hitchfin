@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm';
+import z from '@deepseek-ai/schemastery';
 import { type HitchfinCatalogEntry, type UpstreamStreamTransport } from './adapter/hitchfin-adapter.js';
 import { MagpiePluginWorkerHost } from './channels/plugin-worker-host.js';
 import { AccountPool } from './channels/pool.js';
@@ -29,6 +30,17 @@ export * from './router/sticky-cache.js';
 export * from './rpc/http-routes.js';
 export * from './rpc/types.js';
 export declare const name = "dsh-hitchfin";
+export declare const Config: z<Schemastery.ObjectS<NoInfer<{
+    mode: z<"auto" | "bridge" | "standalone", "auto" | "bridge" | "standalone", "volatile-defined">;
+    magpieEndpoint: z<string, string, "volatile-defined">;
+    maskingEnabled: z<boolean, boolean, "volatile-defined">;
+    blockHighRiskTools: z<boolean, boolean, "volatile-defined">;
+}>>, Schemastery.ObjectT<NoInfer<{
+    mode: z<"auto" | "bridge" | "standalone", "auto" | "bridge" | "standalone", "volatile-defined">;
+    magpieEndpoint: z<string, string, "volatile-defined">;
+    maskingEnabled: z<boolean, boolean, "volatile-defined">;
+    blockHighRiskTools: z<boolean, boolean, "volatile-defined">;
+}>>, "plain">;
 export interface HitchfinPluginConfig {
     mode?: HitchfinRuntimeMode;
     magpieEndpoint?: string;

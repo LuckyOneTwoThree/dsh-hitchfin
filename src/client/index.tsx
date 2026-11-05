@@ -539,8 +539,86 @@ export function HitchfinPrivacySettingsPage() {
   );
 }
 
+/**
+ * Unified configuration panel mounted inside the Plugins Manager
+ * (`plugins.bundle.config`, `plugins.row.config`, `plugins.tab`, `settings.plugins.tab`)
+ */
+export function HitchfinBundleConfigPanel(props: {
+  view?: 'summary' | 'page';
+}): React.ReactElement | null {
+  const [activeTab, setActiveTab] = useState<'routing' | 'privacy'>('routing');
+
+  if (props?.view === 'summary') {
+    return null;
+  }
+
+  return (
+    <div
+      data-testid="hitchfin-bundle-config"
+      style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          gap: '8px',
+          borderBottom: '1px solid rgba(128,128,128,0.2)',
+          paddingBottom: '8px',
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setActiveTab('routing')}
+          style={{
+            padding: '6px 14px',
+            borderRadius: '6px',
+            border: 'none',
+            cursor: 'pointer',
+            fontSize: '13px',
+            fontWeight: activeTab === 'routing' ? 600 : 400,
+            background:
+              activeTab === 'routing'
+                ? 'var(--dsw-alias-bg-layer-3, rgba(16,185,129,0.15))'
+                : 'transparent',
+            color: 'inherit',
+          }}
+        >
+          渠道与智能路由
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('privacy')}
+          style={{
+            padding: '6px 14px',
+            borderRadius: '6px',
+            border: 'none',
+            cursor: 'pointer',
+            fontSize: '13px',
+            fontWeight: activeTab === 'privacy' ? 600 : 400,
+            background:
+              activeTab === 'privacy'
+                ? 'var(--dsw-alias-bg-layer-3, rgba(16,185,129,0.15))'
+                : 'transparent',
+            color: 'inherit',
+          }}
+        >
+          隐私脱敏与配额防护
+        </button>
+      </div>
+      {activeTab === 'routing' ? (
+        <HitchfinRoutingSettingsPage />
+      ) : (
+        <HitchfinPrivacySettingsPage />
+      )}
+    </div>
+  );
+}
+
 export interface ClientPluginContext {
   effect: (fn: () => (() => void) | void, description?: string) => void;
+  inject?: (
+    deps: string[],
+    callback: (scoped: ClientPluginContext) => void,
+  ) => void;
   locale: {
     register: (
       ns: string,
@@ -615,4 +693,71 @@ export function apply(ctx: ClientPluginContext): void {
       HitchfinPrivacySettingsPage,
     ),
   );
+
+  // 5. Plugins page -> Installed -> dsh-hitchfin detail page (`plugins.bundle.config`)
+  ctx.slots.inject('plugins.bundle.config', () =>
+    ctx.slots.register(
+      {
+        name: 'plugins.bundle.config',
+        key: namespace,
+        locale: namespace,
+      },
+      HitchfinBundleConfigPanel,
+    ),
+  );
+
+  // 6. Plugins page -> dsh-hitchfin component row "配置" button (`plugins.row.config`)
+  ctx.slots.inject('plugins.row.config', () =>
+    ctx.slots.register(
+      {
+        name: 'plugins.row.config',
+        key: `${namespace}#${namespace}`,
+        locale: namespace,
+      },
+      HitchfinBundleConfigPanel,
+    ),
+  );
+
+  // 7. Plugins page -> Top tab bar (`plugins.tab`)
+  ctx.slots.inject('plugins.tab', () =>
+    ctx.slots.register(
+      {
+        name: 'plugins.tab',
+        id: namespace,
+        order: 20,
+        label: () => 'Hitchfin 路由与订阅',
+        locale: namespace,
+      },
+      HitchfinBundleConfigPanel,
+    ),
+  );
+
+  // 8. Settings -> Built-in Plugins tab (`settings.plugins.tab`)
+  ctx.slots.inject('settings.plugins.tab', () =>
+    ctx.slots.register(
+      {
+        name: 'settings.plugins.tab',
+        id: namespace,
+        order: 70,
+        label: () => 'Hitchfin 路由与订阅',
+        locale: namespace,
+      },
+      HitchfinBundleConfigPanel,
+    ),
+  );
+
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['settingsScope'], (scoped) => {
+      scoped.slots.inject('settings.plugin.item', () =>
+        scoped.slots.register(
+          {
+            name: 'settings.plugin.item',
+            key: namespace,
+            locale: namespace,
+          },
+          HitchfinBundleConfigPanel,
+        ),
+      );
+    });
+  }
 }

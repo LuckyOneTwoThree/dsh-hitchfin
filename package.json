@@ -48,13 +48,13 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-model-selection",
-        "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-renderer"
+        "@deepseek-ai/dsh-client-ui-settings"
       ],
       "platform": "web"
     }
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.1"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
@@ -64,7 +64,6 @@
     "test:poc": "node --test 'tests/poc/*.spec.ts'"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^1.1.0",
     "js-yaml": "^4.1.0"
   },
   "peerDependencies": {
@@ -73,7 +72,8 @@
     "@deepseek-ai/dsh-credentials": "0.2.1-rc.5",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.5",
     "@deepseek-ai/dsh-settings": "0.2.1-rc.5",
-    "@deepseek-ai/schemastery": "^3.18.5"
+    "@deepseek-ai/schemastery": "^3.18.5",
+    "@earendil-works/pi-ai": "^1.1.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-authorization": {
@@ -87,10 +87,14 @@
     },
     "@deepseek-ai/schemastery": {
       "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5",
+    "@earendil-works/pi-ai": "^1.1.0",
     "@deepseek-ai/dsh-authorization": "0.2.1-rc.5",
     "@deepseek-ai/dsh-client-locale": "0.2.1-rc.5",
     "@deepseek-ai/dsh-client-modules": "0.2.1-rc.5",

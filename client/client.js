@@ -26,6 +26,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/client/index.tsx
 var index_exports = {};
 __export(index_exports, {
+  HitchfinBundleConfigPanel: () => HitchfinBundleConfigPanel,
   HitchfinComposerQuotaCapsule: () => HitchfinComposerQuotaCapsule,
   HitchfinModelLabel: () => HitchfinModelLabel,
   HitchfinPrivacySettingsPage: () => HitchfinPrivacySettingsPage,
@@ -567,6 +568,71 @@ function HitchfinPrivacySettingsPage() {
     )
   ] });
 }
+function HitchfinBundleConfigPanel(props) {
+  const [activeTab, setActiveTab] = (0, import_react.useState)("routing");
+  if (props?.view === "summary") {
+    return null;
+  }
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+    "div",
+    {
+      "data-testid": "hitchfin-bundle-config",
+      style: { display: "flex", flexDirection: "column", gap: "16px" },
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+          "div",
+          {
+            style: {
+              display: "flex",
+              gap: "8px",
+              borderBottom: "1px solid rgba(128,128,128,0.2)",
+              paddingBottom: "8px"
+            },
+            children: [
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                "button",
+                {
+                  type: "button",
+                  onClick: () => setActiveTab("routing"),
+                  style: {
+                    padding: "6px 14px",
+                    borderRadius: "6px",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: "13px",
+                    fontWeight: activeTab === "routing" ? 600 : 400,
+                    background: activeTab === "routing" ? "var(--dsw-alias-bg-layer-3, rgba(16,185,129,0.15))" : "transparent",
+                    color: "inherit"
+                  },
+                  children: "\u6E20\u9053\u4E0E\u667A\u80FD\u8DEF\u7531"
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                "button",
+                {
+                  type: "button",
+                  onClick: () => setActiveTab("privacy"),
+                  style: {
+                    padding: "6px 14px",
+                    borderRadius: "6px",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: "13px",
+                    fontWeight: activeTab === "privacy" ? 600 : 400,
+                    background: activeTab === "privacy" ? "var(--dsw-alias-bg-layer-3, rgba(16,185,129,0.15))" : "transparent",
+                    color: "inherit"
+                  },
+                  children: "\u9690\u79C1\u8131\u654F\u4E0E\u914D\u989D\u9632\u62A4"
+                }
+              )
+            ]
+          }
+        ),
+        activeTab === "routing" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(HitchfinRoutingSettingsPage, {}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(HitchfinPrivacySettingsPage, {})
+      ]
+    }
+  );
+}
 function apply(ctx) {
   const namespace = "dsh-hitchfin";
   ctx.effect(
@@ -621,6 +687,69 @@ function apply(ctx) {
       HitchfinPrivacySettingsPage
     )
   );
+  ctx.slots.inject(
+    "plugins.bundle.config",
+    () => ctx.slots.register(
+      {
+        name: "plugins.bundle.config",
+        key: namespace,
+        locale: namespace
+      },
+      HitchfinBundleConfigPanel
+    )
+  );
+  ctx.slots.inject(
+    "plugins.row.config",
+    () => ctx.slots.register(
+      {
+        name: "plugins.row.config",
+        key: `${namespace}#${namespace}`,
+        locale: namespace
+      },
+      HitchfinBundleConfigPanel
+    )
+  );
+  ctx.slots.inject(
+    "plugins.tab",
+    () => ctx.slots.register(
+      {
+        name: "plugins.tab",
+        id: namespace,
+        order: 20,
+        label: () => "Hitchfin \u8DEF\u7531\u4E0E\u8BA2\u9605",
+        locale: namespace
+      },
+      HitchfinBundleConfigPanel
+    )
+  );
+  ctx.slots.inject(
+    "settings.plugins.tab",
+    () => ctx.slots.register(
+      {
+        name: "settings.plugins.tab",
+        id: namespace,
+        order: 70,
+        label: () => "Hitchfin \u8DEF\u7531\u4E0E\u8BA2\u9605",
+        locale: namespace
+      },
+      HitchfinBundleConfigPanel
+    )
+  );
+  if (typeof ctx.inject === "function") {
+    ctx.inject(["settingsScope"], (scoped) => {
+      scoped.slots.inject(
+        "settings.plugin.item",
+        () => scoped.slots.register(
+          {
+            name: "settings.plugin.item",
+            key: namespace,
+            locale: namespace
+          },
+          HitchfinBundleConfigPanel
+        )
+      );
+    });
+  }
 }
 
     return module.exports;

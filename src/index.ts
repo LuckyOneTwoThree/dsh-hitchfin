@@ -4,6 +4,7 @@ import type {
   AdapterRegistrationHandle,
   LlmRuntime,
 } from '@deepseek-ai/dsh-llm';
+import z from '@deepseek-ai/schemastery';
 import {
   HitchfinAdapter,
   type HitchfinCatalogEntry,
@@ -57,6 +58,19 @@ export * from './rpc/http-routes.js';
 export * from './rpc/types.js';
 
 export const name = 'dsh-hitchfin';
+
+export const Config = z.object({
+  mode: z
+    .union(['auto', 'bridge', 'standalone'])
+    .default('auto')
+    .volatile(),
+  magpieEndpoint: z
+    .string()
+    .default(DEFAULT_MAGPIE_ENDPOINT)
+    .volatile(),
+  maskingEnabled: z.boolean().default(true).volatile(),
+  blockHighRiskTools: z.boolean().default(true).volatile(),
+});
 
 export interface HitchfinPluginConfig {
   mode?: HitchfinRuntimeMode;
@@ -306,6 +320,25 @@ export function apply(ctx: Context, config: HitchfinPluginConfig = {}): void {
                 ).get?.('connection') as HostConnectionService | undefined,
             ),
           'dsh-hitchfin: http routes',
+        );
+      }
+    });
+
+    maybeInject.call(ctx, ['settings'], (settingsCtx: Context) => {
+      const settings = (
+        settingsCtx as unknown as {
+          settings?: {
+            configure?: (
+              opts: { auto: boolean },
+              fiber: unknown,
+            ) => (() => void) | void;
+          };
+        }
+      ).settings;
+      if (typeof settings?.configure === 'function') {
+        settingsCtx.effect(
+          () => settings.configure?.({ auto: false }, ctx.fiber) ?? (() => {}),
+          'dsh-hitchfin: custom settings surface',
         );
       }
     });
