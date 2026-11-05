@@ -39,9 +39,15 @@ export class HitchfinAdapter extends LlmAdapter {
     private readonly transport: UpstreamStreamTransport,
   ) {
     super();
+    this.replaceCatalog(entries);
+  }
+
+  replaceCatalog(entries: HitchfinCatalogEntry[]): string[] {
+    this.catalog.clear();
     for (const entry of entries) {
       this.catalog.set(entry.provider.id, entry);
     }
+    return this.providerIds();
   }
 
   providerIds(): string[] {

@@ -1,4 +1,6 @@
+import type { HitchfinCatalogEntry } from '../adapter/hitchfin-adapter.js';
 import type { ChannelSummary } from '../rpc/types.js';
+import type { AccountPool } from './pool.js';
 
 export interface MagpieDiscoveredModel {
   id: string;
@@ -165,3 +167,63 @@ export async function probeMagpieGateway(
     clearTimeout(timer);
   }
 }
+
+export function buildCatalogEntriesFromMagpie(
+  probe: MagpieProbeResult,
+): HitchfinCatalogEntry[] {
+  if (!probe.reachable || probe.channels.length === 0) {
+    return [];
+  }
+
+  const entries: HitchfinCatalogEntry[] = [];
+  for (const ch of probe.channels) {
+    entries.push({
+      provider: {
+        id: ch.channelId,
+        name: ch.displayName,
+      },
+      strategy: 'smart',
+      models: ch.models.map((modelId) => ({
+        info: {
+          provider: ch.channelId,
+          id: modelId,
+          name: modelId,
+          description: `Bridged via Magpie (${ch.displayName})`,
+          inputModalities: ['text'],
+        },
+        resolved: {
+          context: { contextWindow: 128_000 },
+          defaultMaxTokens: 16_384,
+        },
+      })),
+    });
+  }
+
+  return entries;
+}
+
+export function registerBridgeSlotsOnPool(
+  probe: MagpieProbeResult,
+  pool: AccountPool,
+): void {
+  if (!probe.reachable) return;
+  for (const ch of probe.channels) {
+    const existing = pool.listSlots(ch.channelId);
+    if (existing.length === 0) {
+      pool.registerSlot({
+        slotId: 'magpie-bridge-default',
+        channelId: ch.channelId,
+        label: `${ch.displayName} (Bridge)`,
+        state: 'Healthy',
+        quotas: [
+          {
+            windowLabel: '5h',
+            remainingPercent: 85,
+            confidence: 'estimated',
+          },
+        ],
+      });
+    }
+  }
+}
+

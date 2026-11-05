@@ -39,6 +39,18 @@ export class PolicyGuard {
     return this.blockedCount;
   }
 
+  isBlockingHighRiskTools(): boolean {
+    return this.blockHighRiskTools;
+  }
+
+  setBlockHighRiskTools(enabled: boolean): void {
+    this.blockHighRiskTools = enabled;
+  }
+
+  listHighRiskToolNames(): string[] {
+    return [...this.highRiskTools];
+  }
+
   /**
    * Returns true if unmasking secrets into the given tool's arguments is permitted.
    * High-risk shell and network tools are blocked from receiving unmasked secrets
