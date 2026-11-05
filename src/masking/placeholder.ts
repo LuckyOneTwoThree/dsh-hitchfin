@@ -1,4 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
+import type { CredentialProvider } from '@deepseek-ai/dsh-credentials';
+import { maskingVaultCredentialKey } from '../channels/pool.js';
 
 export const PLACEHOLDER_PREFIX = '{{HF_SEC_';
 export const PLACEHOLDER_SUFFIX = '}}';
@@ -115,6 +117,44 @@ export class SecretVault {
       this.placeholderToRaw.set(placeholder, raw);
       this.rawToPlaceholder.set(raw, placeholder);
     }
+  }
+
+  /**
+   * Persist salt + placeholder table into `ctx.credentials` (`dsh-hitchfin/masking-vault`)
+   * so placeholders remain resolvable across Host restarts.
+   */
+  async saveToCredentials(credentials: CredentialProvider): Promise<void> {
+    const key = maskingVaultCredentialKey();
+    await credentials.modifyRecord(key, async () => ({
+      kind: 'grant',
+      payload: {
+        salt: this.salt,
+        entries: this.exportEntries(),
+        updatedAt: Date.now(),
+      },
+    }));
+  }
+
+  /**
+   * Load persisted salt + placeholder table from `ctx.credentials` (`dsh-hitchfin/masking-vault`).
+   */
+  async loadFromCredentials(credentials: CredentialProvider): Promise<boolean> {
+    const key = maskingVaultCredentialKey();
+    const record = await credentials.readRecord(key);
+    if (!record || record.kind !== 'grant' || !record.payload) {
+      return false;
+    }
+    const payload = record.payload as {
+      salt?: string;
+      entries?: Record<string, string>;
+    };
+    if (typeof payload.salt === 'string' && payload.salt.length > 0) {
+      this.salt = payload.salt;
+    }
+    if (payload.entries && typeof payload.entries === 'object') {
+      this.importEntries(payload.entries);
+    }
+    return true;
   }
 }
 

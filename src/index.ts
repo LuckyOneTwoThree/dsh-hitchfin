@@ -40,6 +40,7 @@ import type {
 export * from './adapter/hitchfin-adapter.js';
 export * from './adapter/openai-sse-transport.js';
 export * from './adapter/pi-ai-transport.js';
+export * from './channels/flows.js';
 export * from './channels/magpie-bridge.js';
 export * from './channels/plugin-worker-host.js';
 export * from './channels/plugin-worker.js';
@@ -48,6 +49,7 @@ export * from './masking/interceptor.js';
 export * from './masking/placeholder.js';
 export * from './masking/policy-guard.js';
 export * from './masking/stream-unmasker.js';
+export * from './migration/backup-restore.js';
 export * from './router/cooldown.js';
 export * from './router/group-router.js';
 export * from './router/sticky-cache.js';
@@ -127,7 +129,10 @@ export class HitchfinHostController implements HitchfinRouteController {
       magpieEndpoint: this.magpieEndpoint,
       channels: [...this.channels],
       accounts: this.pool.listSlots(),
-      routingGroups: [...this.routingGroups],
+      routingGroups:
+        this.routingGroups.length > 0
+          ? [...this.routingGroups]
+          : this.router.listRoutingGroups(),
       masking: {
         enabled: this.maskingEnabled,
         blockHighRiskTools: this.policyGuard.isBlockingHighRiskTools(),

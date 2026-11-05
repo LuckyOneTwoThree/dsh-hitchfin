@@ -40,44 +40,44 @@ flowchart LR
 
 ---
 
-## Phase 1：最小垂直切片 MVP —— 「装上即用，平滑接管/桥接」
+## Phase 1：最小垂直切片 MVP —— 「装上即用，平滑接管/桥接」（已全部完成 ✅）
 
 ### 1.1 目标
 先交付一个**小而极其扎实**的可用版本：打通 **「模式 A（本机 Magpie `127.0.0.1:3425` 动态渠道拆分桥接）+ 模式 B（基于 `@earendil-works/pi-ai` 的单渠道直连）+ 最小设置面板」**。
 
 ### 1.2 交付清单
-- [ ] **M1.1 标准插件工程与 Git 基线**：
+- [x] **M1.1 标准插件工程与 Git 基线**：
   - 提交经评审定稿的 `docs/00`–`05` 文档基线；
-  - 建立 `package.json`、`cordis.patch.yml`、双端 TypeScript 构建配置与 `TypertRemoteService` 通信层。
-- [ ] **M1.2 模式 A：Magpie 动态渠道桥接器 (`magpie-bridge.ts`)**：
-  - 自动探测 `127.0.0.1:3425`，将其暴露的模型按真实渠道（Codex、WorkBuddy、Trae CN 等）动态拆分为独立 Provider 注册到 `ctx.llm`，无需手改 `cordis.patch.yml`，也不抢夺 `refresh_token`。
-- [ ] **M1.3 模式 B：基于 `@earendil-works/pi-ai` 的原生 Adapter (`hitchfin-adapter.ts`)**：
-  - 复用 `@earendil-works/pi-ai` 的 `openai-completions`、`openai-responses`、`anthropic-messages` 协议实现与 `ReplayEnvelope`。
-- [ ] **M1.4 最小设置页 (`ConnectionRoutingPage.tsx`)**：
-  - 在 `settings.section` 中展示连接状态、渠道列表与模式切换开关。
+  - 建立 `package.json`、`cordis.patch.yml`、双端 TypeScript 构建配置与 Host HTTP 通信层（[`src/rpc/http-routes.ts`](../src/rpc/http-routes.ts)）。
+- [x] **M1.2 模式 A：Magpie 动态渠道桥接器 (`magpie-bridge.ts` & `openai-sse-transport.ts`)**：
+  - 自动探测 `127.0.0.1:3425`，将其暴露的模型按真实渠道（Codex、WorkBuddy、Trae CN 等）动态拆分为独立 Provider 注册到 `ctx.llm`，支持 `handle.replace()` 动态热更新，无需手改 `cordis.patch.yml`，也不抢夺 `refresh_token`。
+- [x] **M1.3 模式 B：基于 `@earendil-works/pi-ai` 的原生 Adapter (`hitchfin-adapter.ts` & `pi-ai-transport.ts`)**：
+  - 复用 `@earendil-works/pi-ai` 的 `openai-completions`、`openai-responses`、`anthropic-messages` 协议实现与版本 2 `ReplayEnvelope`。
+- [x] **M1.4 最小设置页 (`src/client/index.tsx`)**：
+  - 在 `settings.section` 中展示连接状态、渠道列表与模式切换开关（`auto` / `bridge` / `standalone`）。
 
 ---
 
-## Phase 2：多账号订阅池与智能路由组
+## Phase 2：多账号订阅池与智能路由组（已全部完成 ✅）
 
 ### 2.1 交付清单
-- [ ] **M2.1 基于 `ctx.credentials` 的多账号池与 `ctx.authorization` 登录流 (`pool.ts` & `flows.ts`)**
-- [ ] **M2.2 受控子进程 `MagpiePluginWorker` (`plugin-worker-host.ts`)**：接入本机已验证的 `@magpie-community` 渠道包。
-- [ ] **M2.3 智能路由组引擎 (`group-router.ts` & `sticky-cache.ts` & `cooldown.ts`)**：
-  - 实现 `order`、`rotate`、`smart`、`pace` 选号策略；
+- [x] **M2.1 基于 `ctx.credentials` 的多账号池与 `ctx.authorization` 登录流 (`pool.ts` & `flows.ts`)**
+- [x] **M2.2 受控子进程 `MagpiePluginWorker` (`plugin-worker-host.ts` & `plugin-worker.ts`)**：接入本机已验证的 `@magpie-community` 渠道包。
+- [x] **M2.3 智能路由组引擎 (`group-router.ts` & `sticky-cache.ts` & `cooldown.ts`)**：
+  - 实现 `order`、`rotate`、`smart`、`pace` 四种选号策略与跨渠道 `RoutingGroupConfig`；
   - 实现复合键 `(sessionId, groupId, model, effort)` 的并发安全 Sticky Session；
   - 实现与 `@deepseek-ai/dsh-llm-retry` 联动的 Step 级无损 Failover。
 
 ---
 
-## Phase 3：策略化出站脱敏与原生配额 UI
+## Phase 3：策略化出站脱敏与原生配额 UI（已全部完成 ✅）
 
 ### 3.1 交付清单
-- [ ] **M3.1 `llm/stream` Waterfall 出站脱敏与防外泄守卫 (`src/masking/`)**：
-  - 实现 `{{HF_SEC_xxxxxxxx}}` 统一占位符与 `ctx.credentials` 持久化 Salt；
+- [x] **M3.1 `llm/stream` Waterfall 出站脱敏与防外泄守卫 (`src/masking/`)**：
+  - 实现 `{{HF_SEC_xxxxxxxx}}` 统一占位符与 `ctx.credentials` 持久化 Salt（[`saveToCredentials` / `loadFromCredentials`](../src/masking/placeholder.ts)）；
   - 实现 `StreamingUnmasker`（覆盖 `*-delta` 与 `block-end.block`、JSON 字符串转义）与 `policy-guard.ts`（阻断向高危 Shell/网络工具自动还原密钥）。
-- [ ] **M3.2 输入框内联额度徽标 (`ModelQuotaBadge.tsx`) 与交互式额度胶囊 (`ComposerQuotaCapsule.tsx`)**
-- [ ] **M3.3 隐私与配额设置页 (`PrivacyQuotaPage.tsx`)** 及完整安装/回滚/卸载清理脚本。
+- [x] **M3.2 输入框内联额度徽标 (`HitchfinModelLabel`) 与交互式额度胶囊 (`HitchfinComposerQuotaCapsule`)**
+- [x] **M3.3 隐私与配额设置页 (`HitchfinPrivacySettingsPage`)** 及完整 `cordis.patch.yml` 备份/回滚清理工具（[`src/migration/backup-restore.ts`](../src/migration/backup-restore.ts)）。
 
 ---
 
