@@ -80,6 +80,34 @@ export interface HitchfinPluginConfig {
   customFetch?: typeof fetch;
 }
 
+function unwrapValue<T>(val: unknown, fallback: T): T {
+  if (val === undefined || val === null) return fallback;
+  if (
+    typeof val === 'object' &&
+    val !== null &&
+    'get' in val &&
+    typeof (val as { get?: unknown }).get === 'function'
+  ) {
+    return unwrapValue((val as { get: () => unknown }).get(), fallback);
+  }
+  return val as T;
+}
+
+export function unwrapConfig(raw: unknown): HitchfinPluginConfig {
+  if (!raw || typeof raw !== 'object') return {};
+  const obj = raw as Record<string, unknown>;
+  return {
+    mode: unwrapValue(obj.mode, 'auto') as HitchfinRuntimeMode,
+    magpieEndpoint: unwrapValue(obj.magpieEndpoint, DEFAULT_MAGPIE_ENDPOINT),
+    maskingEnabled: unwrapValue(obj.maskingEnabled, true),
+    blockHighRiskTools: unwrapValue(obj.blockHighRiskTools, true),
+    customFetch:
+      typeof obj.customFetch === 'function'
+        ? (obj.customFetch as typeof fetch)
+        : undefined,
+  };
+}
+
 export class HitchfinHostController implements HitchfinRouteController {
   readonly pool: AccountPool;
   readonly cooldown = new CooldownTracker();
@@ -103,10 +131,14 @@ export class HitchfinHostController implements HitchfinRouteController {
 
   constructor(
     private readonly ctx: Context,
-    config: HitchfinPluginConfig = {},
+    rawConfig: HitchfinPluginConfig = {},
   ) {
+    const config = unwrapConfig(rawConfig);
     this.mode = config.mode ?? 'auto';
-    this.magpieEndpoint = config.magpieEndpoint ?? DEFAULT_MAGPIE_ENDPOINT;
+    this.magpieEndpoint =
+      typeof config.magpieEndpoint === 'string' && config.magpieEndpoint.trim() !== ''
+        ? config.magpieEndpoint.trim()
+        : DEFAULT_MAGPIE_ENDPOINT;
     this.maskingEnabled = config.maskingEnabled ?? true;
     this.customFetch = config.customFetch;
 
@@ -273,7 +305,8 @@ export class HitchfinHostController implements HitchfinRouteController {
   }
 }
 
-export function apply(ctx: Context, config: HitchfinPluginConfig = {}): void {
+export function apply(ctx: Context, rawConfig: HitchfinPluginConfig = {}): void {
+  const config = unwrapConfig(rawConfig);
   const controller = new HitchfinHostController(ctx, config);
 
   // 1. Register outbound secret masking on the llm/stream waterfall
@@ -300,7 +333,15 @@ export function apply(ctx: Context, config: HitchfinPluginConfig = {}): void {
       const llm = (llmCtx as unknown as { llm?: LlmRuntime }).llm;
       if (llm) {
         controller.attachLlmRuntime(llm);
-        void controller.refreshAndSyncRoutes();
+        controller.refreshAndSyncRoutes().catch((err) => {
+          (
+            ctx as unknown as {
+              logger?: (ns: string) => { warn: (...args: unknown[]) => void };
+            }
+          )
+            .logger?.('dsh-hitchfin')
+            ?.warn('Failed to initialize routes on startup:', err);
+        });
       }
     });
 

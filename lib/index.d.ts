@@ -48,6 +48,7 @@ export interface HitchfinPluginConfig {
     blockHighRiskTools?: boolean;
     customFetch?: typeof fetch;
 }
+export declare function unwrapConfig(raw: unknown): HitchfinPluginConfig;
 export declare class HitchfinHostController implements HitchfinRouteController {
     private readonly ctx;
     readonly pool: AccountPool;
@@ -68,7 +69,7 @@ export declare class HitchfinHostController implements HitchfinRouteController {
     private adapterHandle;
     private defaultTransport;
     private customFetch?;
-    constructor(ctx: Context, config?: HitchfinPluginConfig);
+    constructor(ctx: Context, rawConfig?: HitchfinPluginConfig);
     getStatusSnapshot(): HitchfinStatusSnapshot;
     refreshMagpieBridgeStatus(): Promise<boolean>;
     attachLlmRuntime(llm: LlmRuntime): void;
@@ -82,4 +83,4 @@ export declare class HitchfinHostController implements HitchfinRouteController {
     mountLlmAdapter(llm: LlmRuntime, entries: HitchfinCatalogEntry[], transport?: UpstreamStreamTransport): () => void;
     dispose(): Promise<void>;
 }
-export declare function apply(ctx: Context, config?: HitchfinPluginConfig): void;
+export declare function apply(ctx: Context, rawConfig?: HitchfinPluginConfig): void;

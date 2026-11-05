@@ -392,4 +392,31 @@ describe('Phase 1 MVP Integration Suite (M1.2 - M1.4)', () => {
     disposeRoutes();
     await controller.dispose();
   });
+
+  it('M1.5: unwrapConfig and probeMagpieGateway handle Cosmokit Volatile objects without throwing', async () => {
+    const volatileEndpoint = {
+      get: () => 'http://127.0.0.1:3425',
+    };
+    const volatileMode = {
+      get: () => 'auto',
+    };
+
+    const ctx = new Context();
+    const controller = new HitchfinHostController(ctx, {
+      magpieEndpoint: volatileEndpoint as any,
+      mode: volatileMode as any,
+      customFetch: (async () => {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      }) as any,
+    });
+
+    const snapshot = controller.getStatusSnapshot();
+    expect(snapshot.magpieEndpoint).toBe('http://127.0.0.1:3425');
+    expect(snapshot.mode).toBe('auto');
+
+    const probe = await controller.refreshMagpieBridgeStatus();
+    expect(probe).toBe(true);
+
+    await controller.dispose();
+  });
 });

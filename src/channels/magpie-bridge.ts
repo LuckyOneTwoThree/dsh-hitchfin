@@ -87,11 +87,28 @@ export function inferChannelFromModel(
 }
 
 export async function probeMagpieGateway(
-  endpoint = DEFAULT_MAGPIE_ENDPOINT,
+  rawEndpoint: unknown = DEFAULT_MAGPIE_ENDPOINT,
   timeoutMs = 1500,
   customFetch: typeof fetch = fetch,
 ): Promise<MagpieProbeResult> {
-  const baseUrl = endpoint.replace(/\/+$/, '');
+  let baseUrl = DEFAULT_MAGPIE_ENDPOINT;
+  try {
+    const raw =
+      typeof rawEndpoint === 'object' &&
+      rawEndpoint !== null &&
+      'get' in rawEndpoint &&
+      typeof (rawEndpoint as { get?: unknown }).get === 'function'
+        ? (rawEndpoint as { get: () => unknown }).get()
+        : rawEndpoint;
+    const str =
+      typeof raw === 'string' && raw.trim() !== ''
+        ? raw.trim()
+        : DEFAULT_MAGPIE_ENDPOINT;
+    baseUrl = str.replace(/\/+$/, '');
+  } catch {
+    baseUrl = DEFAULT_MAGPIE_ENDPOINT;
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 

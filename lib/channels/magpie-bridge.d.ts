@@ -19,6 +19,6 @@ export declare function inferChannelFromModel(modelId: string, ownedBy?: string)
     displayName: string;
     complianceTier: 'low' | 'medium' | 'high';
 };
-export declare function probeMagpieGateway(endpoint?: string, timeoutMs?: number, customFetch?: typeof fetch): Promise<MagpieProbeResult>;
+export declare function probeMagpieGateway(rawEndpoint?: unknown, timeoutMs?: number, customFetch?: typeof fetch): Promise<MagpieProbeResult>;
 export declare function buildCatalogEntriesFromMagpie(probe: MagpieProbeResult): HitchfinCatalogEntry[];
 export declare function registerBridgeSlotsOnPool(probe: MagpieProbeResult, pool: AccountPool): void;
