@@ -86,7 +86,6 @@ describe('POC-2: Client bundle window.__ModuleLoader__.load & native UI slot mou
       'conversation.input.model.label',
       'conversation.input.right',
       'settings.section',
-      'settings.section',
       'plugins.bundle.config',
       'plugins.row.config',
       'plugins.tab',

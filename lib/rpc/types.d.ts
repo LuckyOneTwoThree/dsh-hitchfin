@@ -19,7 +19,31 @@ export interface AccountSlotSummary {
     cooldownUntil?: number;
     quotas: QuotaWindowSnapshot[];
     lastUsedAt?: number;
+    baseUrl?: string;
+    models?: string[];
 }
+export interface AutonomousAccountConfig {
+    channelId: string;
+    slotId: string;
+    label: string;
+    authType: 'api-key' | 'oauth' | 'bearer';
+    apiKey?: string;
+    accessToken?: string;
+    refreshToken?: string;
+    baseUrl?: string;
+    models?: string[];
+    updatedAt: number;
+}
+export interface ChannelPreset {
+    channelId: string;
+    name: string;
+    defaultBaseUrl: string;
+    defaultModels: string[];
+    authType: 'api-key' | 'oauth' | 'bearer';
+    placeholder: string;
+    description: string;
+}
+export declare const CHANNEL_PRESETS: ChannelPreset[];
 export interface ChannelSummary {
     channelId: string;
     displayName: string;
@@ -49,6 +73,8 @@ export interface HitchfinStatusSnapshot {
     activeMode: 'bridge' | 'standalone';
     magpieBridgeReachable: boolean;
     magpieEndpoint: string;
+    defaultStrategy?: RoutingStrategy;
+    presets?: ChannelPreset[];
     channels: ChannelSummary[];
     accounts: AccountSlotSummary[];
     routingGroups: RoutingGroupConfig[];

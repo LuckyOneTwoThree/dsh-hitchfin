@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { HitchfinRuntimeMode, HitchfinStatusSnapshot } from './types.js';
+import type { HitchfinRuntimeMode, HitchfinStatusSnapshot, RoutingStrategy } from './types.js';
 export interface WebServerRouteRegistration {
     kind: 'exact';
     path: string;
@@ -20,6 +20,18 @@ export interface HitchfinRouteController {
         enabled?: boolean;
         blockHighRiskTools?: boolean;
     }): HitchfinStatusSnapshot;
+    addAccount(params: {
+        channelId: string;
+        slotId?: string;
+        label: string;
+        authType?: 'api-key' | 'oauth' | 'bearer';
+        apiKey?: string;
+        accessToken?: string;
+        baseUrl?: string;
+        models?: string[];
+    }): Promise<HitchfinStatusSnapshot>;
+    removeAccount(channelId: string, slotId: string): Promise<HitchfinStatusSnapshot>;
+    updateRoutingStrategy(strategy: RoutingStrategy): Promise<HitchfinStatusSnapshot>;
 }
 export declare function sendJson(response: ServerResponse, status: number, payload: unknown): void;
 export declare function loopbackAuthority(host: string | undefined): boolean;

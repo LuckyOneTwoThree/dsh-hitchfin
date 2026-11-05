@@ -31,11 +31,14 @@ import {
   mountHitchfinHttpRoutes,
   type WebServerService,
 } from './rpc/http-routes.js';
-import type {
-  ChannelSummary,
-  HitchfinRuntimeMode,
-  HitchfinStatusSnapshot,
-  RoutingGroupConfig,
+import {
+  type ChannelPreset,
+  CHANNEL_PRESETS,
+  type ChannelSummary,
+  type HitchfinRuntimeMode,
+  type HitchfinStatusSnapshot,
+  type RoutingGroupConfig,
+  type RoutingStrategy,
 } from './rpc/types.js';
 
 export * from './adapter/hitchfin-adapter.js';
@@ -121,6 +124,7 @@ export class HitchfinHostController implements HitchfinRouteController {
   private magpieEndpoint: string;
   private maskingEnabled: boolean;
   private magpieReachable = false;
+  private currentStrategy: RoutingStrategy = 'smart';
   private channels: ChannelSummary[] = [];
   private routingGroups: RoutingGroupConfig[] = [];
   private llmRuntime: LlmRuntime | null = null;
@@ -155,13 +159,45 @@ export class HitchfinHostController implements HitchfinRouteController {
     });
 
     this.defaultTransport = createOpenAiSseTransport({
-      resolveBaseUrl: () => this.magpieEndpoint,
+      resolveBaseUrl: async ({ channelId, slotId }) => {
+        const record = await this.pool.readAccountCredential(channelId, slotId);
+        if (record?.baseUrl && record.baseUrl.trim().length > 0) {
+          return record.baseUrl.trim();
+        }
+        return this.resolveDefaultBaseUrlForChannel(channelId);
+      },
       resolveAuthToken: async ({ channelId, slotId }) => {
         const record = await this.pool.readAccountCredential(channelId, slotId);
         return record?.accessToken ?? record?.apiKey;
       },
+      resolveExtraHeaders: async ({ channelId, slotId }) => {
+        const record = await this.pool.readAccountCredential(channelId, slotId);
+        const headers: Record<string, string> = {};
+        if (channelId.includes('claude') || channelId.includes('anthropic')) {
+          if (record?.apiKey) {
+            headers['x-api-key'] = record.apiKey;
+            headers['anthropic-version'] = '2023-06-01';
+          }
+        }
+        return headers;
+      },
       ...(this.customFetch ? { customFetch: this.customFetch } : {}),
     });
+  }
+
+  private resolveDefaultBaseUrlForChannel(channelId: string): string {
+    const norm = channelId.toLowerCase();
+    if (norm.includes('deepseek')) return 'https://api.deepseek.com';
+    if (norm.includes('openai') || norm.includes('codex'))
+      return 'https://api.openai.com/v1';
+    if (norm.includes('gemini'))
+      return 'https://generativelanguage.googleapis.com/v1beta/openai';
+    if (norm.includes('claude') || norm.includes('anthropic'))
+      return 'https://api.anthropic.com/v1';
+    if (norm.includes('trae')) return 'https://api.trae.ai/v1';
+    if (norm.includes('copilot')) return 'https://api.githubcopilot.com';
+    if (this.magpieReachable && this.magpieEndpoint) return this.magpieEndpoint;
+    return 'https://api.openai.com/v1';
   }
 
   getStatusSnapshot(): HitchfinStatusSnapshot {
@@ -173,6 +209,8 @@ export class HitchfinHostController implements HitchfinRouteController {
           : 'standalone',
       magpieBridgeReachable: this.magpieReachable,
       magpieEndpoint: this.magpieEndpoint,
+      defaultStrategy: this.currentStrategy,
+      presets: CHANNEL_PRESETS,
       channels: [...this.channels],
       accounts: this.pool.listSlots(),
       routingGroups:
@@ -207,29 +245,218 @@ export class HitchfinHostController implements HitchfinRouteController {
     this.llmRuntime = llm;
   }
 
-  async refreshAndSyncRoutes(): Promise<HitchfinStatusSnapshot> {
-    const probe = await probeMagpieGateway(
-      this.magpieEndpoint,
-      1500,
-      this.customFetch,
-    );
-    this.magpieReachable = probe.reachable;
-
-    if (this.mode !== 'standalone' && probe.reachable) {
-      this.channels = probe.channels;
-      registerBridgeSlotsOnPool(probe, this.pool);
-      const entries = buildCatalogEntriesFromMagpie(probe);
-      this.syncCatalogEntries(entries);
-    } else if (this.mode === 'standalone') {
-      this.channels = this.channels.filter(
-        (c) => c.source !== 'magpie-bridge',
-      );
-      if (this.adapterHandle) {
-        this.adapterHandle.replace([]);
-      }
+  private buildAutonomousCatalogEntries(): HitchfinCatalogEntry[] {
+    const entries: HitchfinCatalogEntry[] = [];
+    const accounts = this.pool.listAutonomousAccounts();
+    const byChannel = new Map<string, typeof accounts>();
+    for (const acc of accounts) {
+      const list = byChannel.get(acc.channelId) ?? [];
+      list.push(acc);
+      byChannel.set(acc.channelId, list);
     }
 
+    for (const [channelId, channelAccounts] of byChannel.entries()) {
+      const primary = channelAccounts[0];
+      const modelsSet = new Set<string>();
+      for (const acc of channelAccounts) {
+        if (acc.models && acc.models.length > 0) {
+          for (const m of acc.models) modelsSet.add(m.trim());
+        }
+      }
+      if (modelsSet.size === 0) {
+        const preset = CHANNEL_PRESETS.find(
+          (p) => p.channelId.replace(/^hitchfin[-/]/, '') === channelId,
+        );
+        const defaults = preset?.defaultModels ?? ['default-model'];
+        for (const m of defaults) modelsSet.add(m);
+      }
+
+      const providerId = channelId.startsWith('hitchfin')
+        ? channelId
+        : `hitchfin-${channelId}`;
+      const preset = CHANNEL_PRESETS.find(
+        (p) => p.channelId.replace(/^hitchfin[-/]/, '') === channelId,
+      );
+      const displayName = preset?.name ?? primary.label ?? channelId;
+
+      entries.push({
+        provider: {
+          id: providerId,
+          name: `Hitchfin · ${displayName}`,
+        },
+        strategy: this.currentStrategy,
+        models: [...modelsSet].map((modelId) => ({
+          info: {
+            provider: providerId,
+            id: modelId,
+            name: modelId,
+            description: `Hitchfin 订阅 (${displayName} · ${channelAccounts.length} 账号)`,
+            inputModalities: ['text'],
+          },
+          resolved: {
+            context: { contextWindow: 128_000 },
+            defaultMaxTokens: 16_384,
+          },
+        })),
+      });
+    }
+
+    return entries;
+  }
+
+  private buildAutonomousChannels(): ChannelSummary[] {
+    const channels: ChannelSummary[] = [];
+    const accounts = this.pool.listAutonomousAccounts();
+    const byChannel = new Map<string, typeof accounts>();
+    for (const acc of accounts) {
+      const list = byChannel.get(acc.channelId) ?? [];
+      list.push(acc);
+      byChannel.set(acc.channelId, list);
+    }
+
+    for (const [channelId, channelAccounts] of byChannel.entries()) {
+      const primary = channelAccounts[0];
+      const preset = CHANNEL_PRESETS.find(
+        (p) => p.channelId.replace(/^hitchfin[-/]/, '') === channelId,
+      );
+      const displayName = preset?.name ?? primary.label ?? channelId;
+      const modelsSet = new Set<string>();
+      for (const acc of channelAccounts) {
+        if (acc.models) {
+          for (const m of acc.models) modelsSet.add(m.trim());
+        }
+      }
+      if (modelsSet.size === 0) {
+        const defaults = preset?.defaultModels ?? ['default-model'];
+        for (const m of defaults) modelsSet.add(m);
+      }
+
+      channels.push({
+        channelId: channelId.startsWith('hitchfin')
+          ? channelId
+          : `hitchfin-${channelId}`,
+        displayName,
+        source: primary.authType === 'oauth' ? 'native-oauth' : 'api-key',
+        complianceTier: 'high',
+        activeAccounts: channelAccounts.length,
+        totalAccounts: channelAccounts.length,
+        models: [...modelsSet],
+      });
+    }
+    return channels;
+  }
+
+  async refreshAndSyncRoutes(): Promise<HitchfinStatusSnapshot> {
+    // 1. Reload persisted autonomous accounts from ctx.credentials
+    await this.pool.loadPersistedAccounts();
+
+    // 2. Build catalog entries from autonomous accounts
+    const autonomousEntries = this.buildAutonomousCatalogEntries();
+    const autonomousChannels = this.buildAutonomousChannels();
+
+    // 3. If mode !== 'standalone', optionally probe Magpie
+    let bridgeEntries: HitchfinCatalogEntry[] = [];
+    let bridgeChannels: ChannelSummary[] = [];
+
+    if (this.mode !== 'standalone') {
+      const probe = await probeMagpieGateway(
+        this.magpieEndpoint,
+        1500,
+        this.customFetch,
+      );
+      this.magpieReachable = probe.reachable;
+      if (probe.reachable) {
+        registerBridgeSlotsOnPool(probe, this.pool);
+        bridgeEntries = buildCatalogEntriesFromMagpie(probe);
+        bridgeChannels = probe.channels;
+      }
+    } else {
+      this.magpieReachable = false;
+    }
+
+    // 4. Merge channels: autonomous accounts take precedence
+    const channelMap = new Map<string, ChannelSummary>();
+    for (const ch of bridgeChannels) {
+      channelMap.set(ch.channelId, ch);
+    }
+    for (const ch of autonomousChannels) {
+      channelMap.set(ch.channelId, ch);
+    }
+    this.channels = [...channelMap.values()];
+
+    // 5. Merge catalog entries: autonomous take precedence
+    const catalogMap = new Map<string, HitchfinCatalogEntry>();
+    for (const entry of bridgeEntries) {
+      catalogMap.set(entry.provider.id, entry);
+    }
+    for (const entry of autonomousEntries) {
+      catalogMap.set(entry.provider.id, entry);
+    }
+    const allEntries = [...catalogMap.values()];
+
+    this.syncCatalogEntries(allEntries);
     return this.getStatusSnapshot();
+  }
+
+  async addAccount(params: {
+    channelId: string;
+    slotId?: string;
+    label: string;
+    authType?: 'api-key' | 'oauth' | 'bearer';
+    apiKey?: string;
+    accessToken?: string;
+    baseUrl?: string;
+    models?: string[];
+  }): Promise<HitchfinStatusSnapshot> {
+    const rawChannel = params.channelId.trim();
+    const cleanChannelId = rawChannel.replace(/^hitchfin[-/]/, '');
+    const cleanSlotId =
+      params.slotId?.trim().toLowerCase() ||
+      params.label.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-') ||
+      `slot-${Date.now().toString(36)}`;
+
+    const preset = CHANNEL_PRESETS.find(
+      (p) => p.channelId.replace(/^hitchfin[-/]/, '') === cleanChannelId,
+    );
+    const baseUrl =
+      params.baseUrl?.trim() ||
+      preset?.defaultBaseUrl ||
+      this.resolveDefaultBaseUrlForChannel(cleanChannelId);
+
+    const models =
+      params.models && params.models.length > 0
+        ? params.models.map((m) => m.trim()).filter(Boolean)
+        : preset?.defaultModels ?? ['default-model'];
+
+    await this.pool.addAutonomousAccount({
+      channelId: cleanChannelId,
+      slotId: cleanSlotId,
+      label: params.label.trim(),
+      authType: params.authType ?? preset?.authType ?? 'api-key',
+      apiKey: params.apiKey?.trim(),
+      accessToken: params.accessToken?.trim(),
+      baseUrl,
+      models,
+      updatedAt: Date.now(),
+    });
+
+    return this.refreshAndSyncRoutes();
+  }
+
+  async removeAccount(
+    channelId: string,
+    slotId: string,
+  ): Promise<HitchfinStatusSnapshot> {
+    const bareChannel = channelId.trim().replace(/^hitchfin[-/]/, '');
+    await this.pool.removeAutonomousAccount(bareChannel, slotId.trim());
+    return this.refreshAndSyncRoutes();
+  }
+
+  async updateRoutingStrategy(
+    strategy: RoutingStrategy,
+  ): Promise<HitchfinStatusSnapshot> {
+    this.currentStrategy = strategy;
+    return this.refreshAndSyncRoutes();
   }
 
   async setRuntimeMode(

@@ -10,7 +10,7 @@ import { CooldownTracker } from './router/cooldown.js';
 import { GroupRouter } from './router/group-router.js';
 import { StickySessionCache } from './router/sticky-cache.js';
 import { type HitchfinRouteController } from './rpc/http-routes.js';
-import type { HitchfinRuntimeMode, HitchfinStatusSnapshot } from './rpc/types.js';
+import { type HitchfinRuntimeMode, type HitchfinStatusSnapshot, type RoutingStrategy } from './rpc/types.js';
 export * from './adapter/hitchfin-adapter.js';
 export * from './adapter/openai-sse-transport.js';
 export * from './adapter/pi-ai-transport.js';
@@ -62,6 +62,7 @@ export declare class HitchfinHostController implements HitchfinRouteController {
     private magpieEndpoint;
     private maskingEnabled;
     private magpieReachable;
+    private currentStrategy;
     private channels;
     private routingGroups;
     private llmRuntime;
@@ -70,10 +71,25 @@ export declare class HitchfinHostController implements HitchfinRouteController {
     private defaultTransport;
     private customFetch?;
     constructor(ctx: Context, rawConfig?: HitchfinPluginConfig);
+    private resolveDefaultBaseUrlForChannel;
     getStatusSnapshot(): HitchfinStatusSnapshot;
     refreshMagpieBridgeStatus(): Promise<boolean>;
     attachLlmRuntime(llm: LlmRuntime): void;
+    private buildAutonomousCatalogEntries;
+    private buildAutonomousChannels;
     refreshAndSyncRoutes(): Promise<HitchfinStatusSnapshot>;
+    addAccount(params: {
+        channelId: string;
+        slotId?: string;
+        label: string;
+        authType?: 'api-key' | 'oauth' | 'bearer';
+        apiKey?: string;
+        accessToken?: string;
+        baseUrl?: string;
+        models?: string[];
+    }): Promise<HitchfinStatusSnapshot>;
+    removeAccount(channelId: string, slotId: string): Promise<HitchfinStatusSnapshot>;
+    updateRoutingStrategy(strategy: RoutingStrategy): Promise<HitchfinStatusSnapshot>;
     setRuntimeMode(mode: HitchfinRuntimeMode): Promise<HitchfinStatusSnapshot>;
     updateMaskingConfig(patch: {
         enabled?: boolean;

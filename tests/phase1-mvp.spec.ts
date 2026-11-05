@@ -419,4 +419,128 @@ describe('Phase 1 MVP Integration Suite (M1.2 - M1.4)', () => {
 
     await controller.dispose();
   });
+
+  it('M1.6: Autonomous account management endpoints (add, remove, strategy) run standalone without Magpie', async () => {
+    const ctx = new Context();
+    ctx.plugin(LlmRuntime);
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Standalone controller - Magpie is completely offline / unreachable
+    const mockFailingFetch: typeof fetch = async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:3425');
+    };
+
+    const controller = new HitchfinHostController(ctx, {
+      mode: 'standalone',
+      customFetch: mockFailingFetch,
+    });
+    controller.attachLlmRuntime(ctx.llm);
+
+    const initial = await controller.refreshAndSyncRoutes();
+    expect(initial.activeMode).toBe('standalone');
+    expect(initial.magpieBridgeReachable).toBe(false);
+    expect(initial.accounts.length).toBe(0);
+
+    const registeredRoutes = new Map<string, WebServerRouteRegistration>();
+    const disposeRoutes = mountHitchfinHttpRoutes(
+      {
+        register(route) {
+          registeredRoutes.set(route.path, route);
+          return () => registeredRoutes.delete(route.path);
+        },
+      },
+      controller,
+    );
+
+    async function callRoute(
+      path: string,
+      method: 'GET' | 'POST',
+      body?: Record<string, unknown>,
+    ): Promise<{ status: number; json: any }> {
+      const route = registeredRoutes.get(path);
+      if (!route) throw new Error(`Route not found: ${path}`);
+      const reqStream = Readable.from(
+        body ? [Buffer.from(JSON.stringify(body))] : [],
+      ) as any;
+      reqStream.method = method;
+      reqStream.headers = { host: '127.0.0.1:3080' };
+
+      let status = 200;
+      let responseText = '';
+      const res = {
+        writeHead(code: number) {
+          status = code;
+          return this;
+        },
+        end(chunk?: string | Buffer) {
+          if (chunk) responseText += String(chunk);
+          return this;
+        },
+      } as any;
+
+      await route.handler(reqStream, res);
+      return {
+        status,
+        json: responseText ? JSON.parse(responseText) : null,
+      };
+    }
+
+    // 1. Add autonomous DeepSeek account
+    const addDeepSeek = await callRoute('/api/hitchfin/account/add', 'POST', {
+      channelId: 'deepseek',
+      label: 'DeepSeek 主号',
+      apiKey: 'sk-test-deepseek-key',
+      baseUrl: 'https://api.deepseek.com',
+      models: ['deepseek-chat', 'deepseek-reasoner'],
+    });
+    expect(addDeepSeek.status).toBe(200);
+    expect(addDeepSeek.json.accounts.length).toBe(1);
+    expect(addDeepSeek.json.accounts[0].label).toBe('DeepSeek 主号');
+
+    // LLM runtime immediately has hitchfin-deepseek provider
+    const providersAfterAdd = ctx.llm.listProviders().map((p) => p.id);
+    expect(providersAfterAdd).toContain('hitchfin-deepseek');
+
+    const models = await ctx.llm.listModels('hitchfin-deepseek');
+    expect(models.map((m) => m.id)).toEqual([
+      'deepseek-chat',
+      'deepseek-reasoner',
+    ]);
+
+    // 2. Add second account (OpenAI Codex)
+    const addCodex = await callRoute('/api/hitchfin/account/add', 'POST', {
+      channelId: 'openai-codex',
+      label: 'Personal ChatGPT Plus',
+      apiKey: 'sk-test-openai-key',
+      baseUrl: 'https://api.openai.com/v1',
+      models: ['gpt-4o', 'o1'],
+    });
+    expect(addCodex.status).toBe(200);
+    expect(addCodex.json.accounts.length).toBe(2);
+
+    // 3. Update routing strategy to rotate
+    const stratRes = await callRoute(
+      '/api/hitchfin/routing/strategy',
+      'POST',
+      { strategy: 'rotate' },
+    );
+    expect(stratRes.status).toBe(200);
+    expect(stratRes.json.defaultStrategy).toBe('rotate');
+
+    // 4. Remove the DeepSeek account
+    const removeRes = await callRoute(
+      '/api/hitchfin/account/remove',
+      'POST',
+      {
+        channelId: 'deepseek',
+        slotId: addDeepSeek.json.accounts[0].slotId,
+      },
+    );
+    expect(removeRes.status).toBe(200);
+    expect(removeRes.json.accounts.length).toBe(1);
+    expect(removeRes.json.accounts[0].channelId).toBe('openai-codex');
+
+    disposeRoutes();
+    await controller.dispose();
+  });
 });
