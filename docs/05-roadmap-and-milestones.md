@@ -17,27 +17,26 @@ flowchart LR
 
 ---
 
-## Phase 0：5 项 Go/No-Go 真机 POC 验证（开工第一要务）
+## Phase 0：5 项 Go/No-Go 真机 POC 验证（已全部通过 ✅）
 
-在编写大规模业务代码前，先用最小代码在本机 DSH Desktop (`0.2.1-rc.5`) 上跑通以下 5 个技术验证点：
+在编写大规模业务代码前，已使用本机 DSH Desktop (`0.2.1-rc.5`) 自带的 Node `24.21.0` 跑通以下 5 个技术验证点（见 `tests/poc/poc1`–`poc5`）：
 
-- [ ] **POC-1：`LlmAdapter` 注册与流式全链路验证**
-  - 调用 `ctx.llm.registerAdapter(['hitchfin-poc'], adapter)` 注册一个最小路由；
-  - 验证 DSH 模型选择器自动响应无载荷 `'llm/adapters-updated'` 事件并列出模型；
-  - 验证发出 `block-start` $\rightarrow$ `reasoning-delta` $\rightarrow$ `text-delta` $\rightarrow$ `block-end` $\rightarrow$ `usage` $\rightarrow$ `finish`（含 `aborted` 带 `failure`）在 DSH 聊天界面正常渲染与落盘。
-- [ ] **POC-2：客户端三大原生 Slot 挂载验证**
-  - 验证 `conversation.input.model.label` 渲染非交互内联额度徽标（如 `5h 85%`）；
-  - 验证 `conversation.input.right` 渲染可点击胶囊弹窗；
-  - 验证 `settings.section` 注册设置页面并通过 `TypertRemoteService` 与 Host 通信。
-- [ ] **POC-3：`ctx.credentials` 多槽位读写与 `dsh-llm-retry` 协同切号验证**
-  - 验证 `ctx.credentials.modifyRecord(credentialKey('dsh-hitchfin', 'test-acct-1'), ...)` 跨进程安全读写；
-  - 模拟账号 1 返回 `LlmError('rate limited', 'RATE_LIMIT', { status: 429, providerRetryAfterMs: 100 })`，验证 `@deepseek-ai/dsh-llm-retry` 自动在 Step 边界触发重跑并命中账号 2。
-- [ ] **POC-4：独立子进程运行本机 3 个 `@magpie-community` 插件验证**
-  - 使用 `child_process.fork` 加载本机 `~/.config/magpie/plugins/node_modules/@magpie-community/opencode-{workbuddy,trae,zcode}-auth` 的 `opencode.mjs`；
-  - 逐一记录 3 个插件的真实入参签名、导出的钩子（`auth`、`config`、`usage`、`magpie`）及模型拉取与流式请求表现。
-- [ ] **POC-5：出站脱敏边界与防外泄测试**
-  - 验证 `ctx.on('llm/stream')` Waterfall 拦截深冻结请求并构造脱敏副本；
-  - 验证含引号/换行的假密钥在 `tool-call-delta` 与 `block-end.block` 中的 JSON 安全转义，以及对 `bash` / 网络工具的外泄阻断。
+- [x] **POC-1：`LlmAdapter` 注册与流式全链路验证**（[`tests/poc/poc1-llm-adapter.spec.ts`](../tests/poc/poc1-llm-adapter.spec.ts)）
+  - 继承抽象类 `LlmAdapter` 并调用 `ctx.llm.registerAdapter(['hitchfin-codex'], adapter)` 注册路由；
+  - 验证无载荷 `'llm/adapters-updated'` 事件触发及 `probeMagpieGateway('http://127.0.0.1:3425')` 渠道自动归类；
+  - 验证 `block-start` $\rightarrow$ `reasoning-delta` $\rightarrow$ `text-delta` $\rightarrow$ `block-end` $\rightarrow$ `usage` $\rightarrow$ `finish` 通过真实 `BlockAssembler.blocks()` 校验。
+- [x] **POC-2：客户端 `window.__ModuleLoader__.load` 与三大原生 Slot 挂载验证**（[`tests/poc/poc2-client-slots.spec.ts`](../tests/poc/poc2-client-slots.spec.ts)）
+  - 验证构建产物 `client/client.js` 通过 `window.__ModuleLoader__.load({ id: 'dsh-hitchfin', factory })` 注册；
+  - 验证 `conversation.input.model.label`、`conversation.input.right` 与 2 个 `settings.section` 页面挂载。
+- [x] **POC-3：`ctx.credentials` 多槽位互斥读写与 Step 边界协同切号验证**（[`tests/poc/poc3-credentials-and-retry.spec.ts`](../tests/poc/poc3-credentials-and-retry.spec.ts)）
+  - 验证 `credentialKey('dsh-hitchfin', 'hitchfin-codex-acct-slot-1')` 并发刷新时仅发起 1 次上游刷新请求；
+  - 验证账号 1 返回 `429` 时进入 `Cooldown`、抛出 `LlmError(..., 'RATE_LIMIT', { status: 429, providerRetryAfterMs: 100 })`，并在下一次 Step 重跑时自动命中账号 2。
+- [x] **POC-4：独立子进程运行本机 3 个 `@magpie-community` 插件验证**（[`tests/poc/poc4-community-plugin-worker.spec.ts`](../tests/poc/poc4-community-plugin-worker.spec.ts)）
+  - 使用 `child_process.fork` 加载本机 `~/.config/magpie/plugins/node_modules/@magpie-community/opencode-{workbuddy,trae,zcode}-auth/opencode.mjs`，全部成功导出 `auth` 钩子与认证方式列表。
+- [x] **POC-5：出站脱敏边界与防外泄测试**（[`tests/poc/poc5-masking-and-guard.spec.ts`](../tests/poc/poc5-masking-and-guard.spec.ts)）
+  - 验证 `llm/stream` Waterfall 对 `Object.freeze` 请求的脱敏克隆；
+  - 验证含引号/换行的密钥跨 3 个分片切分时在安全工具（`write_config`）中完成 JSON 安全转义并通过 `JSON.parse()`，同时在高危工具（`bash` 执行 `curl`）中被 `PolicyGuard` 拦截阻断外泄。
+  - **额外关键发现（macOS Hardened Runtime 签名约束）**：DSH Desktop 内置的 `node` 二进制启用了 Apple Team ID Library Validation，任何第三方 `.node` 原生扩展（如 `@rollup/rollup-darwin-arm64`）都会因 Team ID 不一致被 `dlopen` 拒绝（`ERR_DLOPEN_FAILED`）。因此 `dsh-hitchfin` 必须保持 **100% 纯 JS/ESM 零原生 addon**，测试统一采用 Node 24 原生 `node --test` 运行器。
 
 ---
 

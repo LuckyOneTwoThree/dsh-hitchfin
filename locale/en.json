@@ -1,0 +1,6 @@
+{
+  "nav.routing": "Hitchfin Channels & Routing",
+  "nav.privacy": "Hitchfin Privacy & Quota",
+  "badge.quota": "{window} {percent}%",
+  "capsule.title": "Subscription Quota & Accounts"
+}

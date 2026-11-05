@@ -1,0 +1,6 @@
+{
+  "nav.routing": "Hitchfin 渠道与路由",
+  "nav.privacy": "Hitchfin 隐私与配额",
+  "badge.quota": "{window} {percent}%",
+  "capsule.title": "订阅额度与账号池"
+}
