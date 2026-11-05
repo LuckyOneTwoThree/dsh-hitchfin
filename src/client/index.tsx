@@ -214,7 +214,7 @@ function useHitchfinStatus() {
 
   const importSubscriptions = useCallback(
     async (accountIds: string[] | 'all') => {
-      if (typeof fetch !== 'function') return;
+      if (typeof fetch !== 'function') throw new Error('fetch unavailable');
       setBusy(true);
       try {
         const res = await fetch('/api/hitchfin/import-subscriptions', {
@@ -228,6 +228,31 @@ function useHitchfinStatus() {
           notifySnapshot((await res.json()) as HitchfinStatusSnapshot);
           return true;
         }
+        const err = await res.json().catch(() => ({ error: `同步失败 (${res.status})` }));
+        throw new Error(err.error || `同步失败 (${res.status})`);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
+  const updateModels = useCallback(
+    async (channelId: string, slotId: string, models: string[]) => {
+      if (typeof fetch !== 'function') throw new Error('fetch unavailable');
+      setBusy(true);
+      try {
+        const res = await fetch('/api/hitchfin/account/update-models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channelId, slotId, models }),
+        });
+        if (res.ok) {
+          notifySnapshot((await res.json()) as HitchfinStatusSnapshot);
+          return true;
+        }
+        const err = await res.json().catch(() => ({ error: `更新模型失败 (${res.status})` }));
+        throw new Error(err.error || `更新模型失败 (${res.status})`);
       } finally {
         setBusy(false);
       }
@@ -251,7 +276,8 @@ function useHitchfinStatus() {
         interval: number;
       };
     }
-    throw new Error('启动 GitHub Copilot 认证失败');
+    const err = await res.json().catch(() => ({ error: '启动 GitHub Copilot 认证失败' }));
+    throw new Error(err.error || '启动 GitHub Copilot 认证失败');
   }, []);
 
   const pollCopilotAuth = useCallback(async (deviceCode: string) => {
@@ -272,7 +298,8 @@ function useHitchfinStatus() {
       }
       return data;
     }
-    throw new Error('轮询 Copilot 状态异常');
+    const err = await res.json().catch(() => ({ error: '轮询 Copilot 状态异常' }));
+    throw new Error(err.error || '轮询 Copilot 状态异常');
   }, []);
 
   return {
@@ -285,6 +312,7 @@ function useHitchfinStatus() {
     removeAccount,
     updateStrategy,
     importSubscriptions,
+    updateModels,
     startCopilotAuth,
     pollCopilotAuth,
   };
@@ -316,10 +344,12 @@ export function HitchfinModelLabel({ provider, model }: ModelLabelProps) {
   );
   const topQuota = slot?.quotas?.[0];
   const badgeText = topQuota
-    ? `${topQuota.windowLabel} ${topQuota.remainingPercent}%`
-    : '套餐额度充沛';
+    ? topQuota.remainingPercent < 100
+      ? `${topQuota.windowLabel}`
+      : (topQuota.windowLabel || '套餐可用')
+    : '套餐可用';
   const tone =
-    topQuota && topQuota.remainingPercent <= 20 ? 'warning' : 'info';
+    topQuota && topQuota.remainingPercent <= 20 ? 'warning' : 'success';
 
   return (
     <span
@@ -431,6 +461,320 @@ export function HitchfinComposerQuotaCapsule() {
   );
 }
 
+interface AccountModelEditorProps {
+  channelId: string;
+  slotId: string;
+  label: string;
+  currentModels: string[];
+  candidateModels: string[];
+  defaultModels: string[];
+  onSave: (models: string[]) => Promise<void>;
+  onClose: () => void;
+}
+
+function AccountModelEditor({
+  currentModels,
+  candidateModels,
+  defaultModels,
+  onSave,
+  onClose,
+}: AccountModelEditorProps) {
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(currentModels && currentModels.length > 0 ? currentModels : defaultModels),
+  );
+  const [search, setSearch] = useState('');
+  const [customModel, setCustomModel] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState('');
+
+  const allAvailable = Array.from(
+    new Set([...candidateModels, ...currentModels, ...defaultModels]),
+  );
+
+  const filtered = allAvailable.filter((m) =>
+    m.toLowerCase().includes(search.trim().toLowerCase()),
+  );
+
+  const toggleModel = (m: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(m)) next.delete(m);
+      else next.add(m);
+      return next;
+    });
+  };
+
+  const selectAll = () => setSelected(new Set(allAvailable));
+  const clearAll = () => setSelected(new Set());
+  const resetDefaults = () => setSelected(new Set(defaultModels));
+
+  const handleAddCustom = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = customModel.trim();
+    if (!trimmed) return;
+    setSelected((prev) => new Set([...prev, trimmed]));
+    setCustomModel('');
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveMsg('');
+    try {
+      await onSave(Array.from(selected));
+      setSaveMsg('✓ 已成功保存并在 DSH 模型列表生效！');
+      setTimeout(() => {
+        setSaveMsg('');
+        onClose();
+      }, 1200);
+    } catch (err) {
+      setSaveMsg(`⚠️ ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: '10px',
+        padding: '14px',
+        borderRadius: '8px',
+        border: '1.5px solid #10b981',
+        background: 'var(--dsw-alias-bg-layer-1, #1e1e1e)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '10px',
+        boxShadow: '0 4px 12px rgba(16,185,129,0.12)',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '8px',
+        }}
+      >
+        <div style={{ fontWeight: 600, fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span>⚙️ 自定义要在 DSH 模型列表展示的模型</span>
+          <span style={{ fontSize: '11px', opacity: 0.75 }}>
+            (已选 {selected.size} / 共 {allAvailable.length} 个候选)
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          <button
+            type="button"
+            onClick={selectAll}
+            style={{
+              padding: '2px 8px',
+              borderRadius: '4px',
+              border: '1px solid rgba(128,128,128,0.3)',
+              background: 'transparent',
+              fontSize: '11px',
+              cursor: 'pointer',
+            }}
+          >
+            全选
+          </button>
+          <button
+            type="button"
+            onClick={clearAll}
+            style={{
+              padding: '2px 8px',
+              borderRadius: '4px',
+              border: '1px solid rgba(128,128,128,0.3)',
+              background: 'transparent',
+              fontSize: '11px',
+              cursor: 'pointer',
+            }}
+          >
+            清空
+          </button>
+          <button
+            type="button"
+            onClick={resetDefaults}
+            style={{
+              padding: '2px 8px',
+              borderRadius: '4px',
+              border: '1px solid rgba(128,128,128,0.3)',
+              background: 'transparent',
+              fontSize: '11px',
+              cursor: 'pointer',
+            }}
+          >
+            恢复推荐默认
+          </button>
+        </div>
+      </div>
+
+      {/* Filter search */}
+      <input
+        type="text"
+        placeholder="🔍 搜索模型名称（如 flash、pro、seed、gpt-4o、claude...）"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        style={{
+          width: '100%',
+          boxSizing: 'border-box',
+          padding: '6px 10px',
+          borderRadius: '4px',
+          border: '1px solid rgba(128,128,128,0.3)',
+          background: 'var(--dsw-alias-bg-layer-2, transparent)',
+          color: 'inherit',
+          fontSize: '12px',
+        }}
+      />
+
+      {/* Candidate Checkboxes Grid */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+          gap: '6px',
+          maxHeight: '200px',
+          overflowY: 'auto',
+          padding: '4px',
+          border: '1px solid rgba(128,128,128,0.15)',
+          borderRadius: '6px',
+        }}
+      >
+        {filtered.length === 0 ? (
+          <div style={{ padding: '12px', fontSize: '12px', opacity: 0.6, gridColumn: '1 / -1', textAlign: 'center' }}>
+            未找到匹配的模型，可在下方手动输入添加
+          </div>
+        ) : (
+          filtered.map((m) => {
+            const isChecked = selected.has(m);
+            return (
+              <label
+                key={m}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '5px 8px',
+                  borderRadius: '4px',
+                  border: isChecked
+                    ? '1px solid rgba(16,185,129,0.5)'
+                    : '1px solid rgba(128,128,128,0.15)',
+                  background: isChecked
+                    ? 'rgba(16,185,129,0.1)'
+                    : 'transparent',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                  userSelect: 'none',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={isChecked}
+                  onChange={() => toggleModel(m)}
+                  style={{ accentColor: '#10b981', cursor: 'pointer' }}
+                />
+                <span
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    fontWeight: isChecked ? 600 : 400,
+                    color: isChecked ? '#10b981' : 'inherit',
+                  }}
+                  title={m}
+                >
+                  {m}
+                </span>
+              </label>
+            );
+          })
+        )}
+      </div>
+
+      {/* Add Custom Model */}
+      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+        <input
+          type="text"
+          placeholder="输入未在列表中的自定义模型标识 (如 qwen3-coder, gpt-4.5) 并添加"
+          value={customModel}
+          onChange={(e) => setCustomModel(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              handleAddCustom();
+            }
+          }}
+          style={{
+            flex: 1,
+            padding: '6px 10px',
+            borderRadius: '4px',
+            border: '1px solid rgba(128,128,128,0.3)',
+            background: 'var(--dsw-alias-bg-layer-2, transparent)',
+            color: 'inherit',
+            fontSize: '12px',
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => handleAddCustom()}
+          style={{
+            padding: '6px 14px',
+            borderRadius: '4px',
+            border: 'none',
+            background: 'rgba(128,128,128,0.2)',
+            color: 'inherit',
+            fontSize: '12px',
+            fontWeight: 500,
+            cursor: 'pointer',
+          }}
+        >
+          + 添加模型
+        </button>
+      </div>
+
+      {saveMsg && (
+        <div style={{ fontSize: '12px', color: saveMsg.startsWith('✓') ? '#10b981' : '#ef4444' }}>
+          {saveMsg}
+        </div>
+      )}
+
+      {/* Actions */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '4px' }}>
+        <button
+          type="button"
+          onClick={onClose}
+          style={{
+            padding: '5px 14px',
+            borderRadius: '4px',
+            border: '1px solid rgba(128,128,128,0.3)',
+            background: 'transparent',
+            fontSize: '12px',
+            cursor: 'pointer',
+          }}
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          disabled={saving}
+          onClick={() => void handleSave()}
+          style={{
+            padding: '5px 18px',
+            borderRadius: '4px',
+            border: 'none',
+            background: '#10b981',
+            color: '#ffffff',
+            fontWeight: 600,
+            fontSize: '12px',
+            cursor: 'pointer',
+          }}
+        >
+          {saving ? '正在保存并在 DSH 生效...' : '💾 保存并在 DSH 模型选择列表生效'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Single Unified Settings Dashboard for AI Subscription Plans.
  * Connects directly to ChatGPT Plus/Team, Copilot, Trae, WorkBuddy, ZCode official subscriptions.
@@ -446,12 +790,15 @@ export function HitchfinUnifiedSettingsDashboard() {
     removeAccount,
     updateStrategy,
     importSubscriptions,
+    updateModels,
     startCopilotAuth,
     pollCopilotAuth,
   } = useHitchfinStatus();
 
-  // Add Subscription Mode
-  const [showAddForm, setShowAddForm] = useState(false);
+  // Add Subscription Mode (defaults to open if no accounts configured yet)
+  const [showAddForm, setShowAddForm] = useState(
+    () => status.accounts.length === 0,
+  );
   const [activeLoginTab, setActiveLoginTab] = useState<'oauth' | 'token'>('oauth');
 
   // Manual Token Form State
@@ -463,6 +810,13 @@ export function HitchfinUnifiedSettingsDashboard() {
   const [modelsInput, setModelsInput] = useState('gpt-4o, gpt-4o-mini, o1, o3-mini');
   const [formError, setFormError] = useState('');
   const [formSuccess, setFormSuccess] = useState('');
+
+  // Active Model Editor Slot
+  const [editingSlotKey, setEditingSlotKey] = useState<string | null>(null);
+
+  // Sync Progress State
+  const [importingId, setImportingId] = useState<string | null>(null);
+  const [importingAll, setImportingAll] = useState(false);
 
   // Copilot Device Code State
   const [copilotFlow, setCopilotFlow] = useState<{
@@ -487,16 +841,35 @@ export function HitchfinUnifiedSettingsDashboard() {
     }
   };
 
+  // Import individual discovered account
+  const handleImportSingleDiscovered = async (id: string, name: string) => {
+    setImportingId(id);
+    setFormError('');
+    setFormSuccess('');
+    try {
+      await importSubscriptions([id]);
+      setFormSuccess(`✓ 已成功同步官方套餐账号：${name}！已挂载至 DSH 模型列表。`);
+      setTimeout(() => setFormSuccess(''), 4000);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImportingId(null);
+    }
+  };
+
   // One-click import discovered accounts
   const handleImportAllDiscovered = async () => {
+    setImportingAll(true);
     setFormSuccess('');
     setFormError('');
     try {
       await importSubscriptions('all');
-      setFormSuccess('已成功同步本机全部官方套餐订阅！');
-      setTimeout(() => setFormSuccess(''), 3000);
+      setFormSuccess('✓ 已成功同步本机全部官方套餐订阅！所有模型已挂载至 DSH 聊天输入框。');
+      setTimeout(() => setFormSuccess(''), 4500);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImportingAll(false);
     }
   };
 
@@ -689,6 +1062,70 @@ export function HitchfinUnifiedSettingsDashboard() {
         </div>
       </div>
 
+      {/* Global Form Alerts - Positioned right at the top for immediate feedback */}
+      {formError && (
+        <div
+          style={{
+            padding: '12px 16px',
+            borderRadius: '8px',
+            background: 'rgba(239, 68, 68, 0.15)',
+            border: '1px solid rgba(239, 68, 68, 0.4)',
+            color: '#ef4444',
+            fontSize: '13px',
+            fontWeight: 500,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <span>⚠️ {formError}</span>
+          <button
+            type="button"
+            onClick={() => setFormError('')}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: '#ef4444',
+              cursor: 'pointer',
+              fontSize: '14px',
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+      {formSuccess && (
+        <div
+          style={{
+            padding: '12px 16px',
+            borderRadius: '8px',
+            background: 'rgba(16, 185, 129, 0.15)',
+            border: '1px solid rgba(16, 185, 129, 0.4)',
+            color: '#10b981',
+            fontSize: '13px',
+            fontWeight: 500,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <span>✓ {formSuccess}</span>
+          <button
+            type="button"
+            onClick={() => setFormSuccess('')}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: '#10b981',
+              cursor: 'pointer',
+              fontSize: '14px',
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* 2. Discovered Local Official Subscriptions Notification Banner */}
       {discovered.length > 0 && (
         <div
@@ -731,10 +1168,10 @@ export function HitchfinUnifiedSettingsDashboard() {
 
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || importingAll}
               onClick={() => void handleImportAllDiscovered()}
               style={{
-                padding: '7px 18px',
+                padding: '8px 20px',
                 borderRadius: '6px',
                 border: 'none',
                 background: '#10b981',
@@ -745,86 +1182,82 @@ export function HitchfinUnifiedSettingsDashboard() {
                 boxShadow: '0 2px 8px rgba(16,185,129,0.3)',
               }}
             >
-              {busy ? '正在同步...' : '一键同步全部已登录官方套餐'}
+              {importingAll ? '⏳ 正在全量同步中...' : '一键同步全部已登录官方套餐'}
             </button>
           </div>
 
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
-              gap: '8px',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+              gap: '10px',
             }}
           >
-            {discovered.map((d) => (
-              <div
-                key={d.id}
-                style={{
-                  padding: '8px 12px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.2)',
-                  background: 'var(--dsw-alias-bg-layer-1, transparent)',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: '13px' }}>
-                    {d.providerName}
-                  </div>
-                  <div style={{ fontSize: '11px', opacity: 0.75 }}>
-                    账号: {d.user} · 套餐: {d.plan}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void importSubscriptions([d.id])}
+            {discovered.map((d) => {
+              const isThisImporting = importingId === d.id;
+              const quotaText = d.quotas?.[0]?.windowLabel || '套餐正常';
+              const totalModels = d.candidateModels?.length ?? d.models.length;
+              return (
+                <div
+                  key={d.id}
                   style={{
-                    padding: '3px 8px',
-                    borderRadius: '4px',
-                    border: '1px solid #10b981',
-                    background: 'transparent',
-                    color: '#10b981',
-                    fontSize: '11px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
+                    padding: '10px 14px',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(128,128,128,0.2)',
+                    background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: '10px',
                   }}
                 >
-                  同步
-                </button>
-              </div>
-            ))}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ fontWeight: 600, fontSize: '13px' }}>
+                        {d.providerName}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          padding: '1px 6px',
+                          borderRadius: '4px',
+                          background: 'rgba(16,185,129,0.15)',
+                          color: '#10b981',
+                          fontWeight: 500,
+                        }}
+                      >
+                        {quotaText}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '11px', opacity: 0.8, marginTop: '2px' }}>
+                      账号: {d.user} · 套餐: {d.plan}
+                    </div>
+                    <div style={{ fontSize: '11px', opacity: 0.65, marginTop: '2px' }}>
+                      推荐 {d.models.length} 个模型 (共 {totalModels} 个可选)
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy || isThisImporting}
+                    onClick={() => void handleImportSingleDiscovered(d.id, d.providerName)}
+                    style={{
+                      padding: '5px 12px',
+                      borderRadius: '5px',
+                      border: '1px solid #10b981',
+                      background: isThisImporting ? 'rgba(16,185,129,0.2)' : 'transparent',
+                      color: '#10b981',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {isThisImporting ? '导入中...' : '单独导入'}
+                  </button>
+                </div>
+              );
+            })}
           </div>
-        </div>
-      )}
-
-      {/* Global Form Alerts */}
-      {formError && (
-        <div
-          style={{
-            padding: '10px 14px',
-            borderRadius: '6px',
-            background: 'rgba(239, 68, 68, 0.15)',
-            color: '#ef4444',
-            fontSize: '13px',
-          }}
-        >
-          ⚠️ {formError}
-        </div>
-      )}
-      {formSuccess && (
-        <div
-          style={{
-            padding: '10px 14px',
-            borderRadius: '6px',
-            background: 'rgba(16, 185, 129, 0.15)',
-            color: '#10b981',
-            fontSize: '13px',
-          }}
-        >
-          ✓ {formSuccess}
         </div>
       )}
 
@@ -1388,8 +1821,8 @@ export function HitchfinUnifiedSettingsDashboard() {
         ) : (
           <div
             style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+              display: 'flex',
+              flexDirection: 'column',
               gap: '12px',
             }}
           >
@@ -1399,116 +1832,190 @@ export function HitchfinUnifiedSettingsDashboard() {
                   p.channelId === acc.channelId ||
                   acc.channelId.includes(p.channelId),
               );
+              const slotKey = `${acc.channelId}::${acc.slotId}`;
+              const isEditingModels = editingSlotKey === slotKey;
+              const quotaSnapshot = acc.quotas && acc.quotas.length > 0 ? acc.quotas[0] : undefined;
+              const quotaLabel = quotaSnapshot?.windowLabel || '套餐可用 (无硬顶限制)';
+              const enabledModels = acc.models && acc.models.length > 0 ? acc.models : ['默认模型'];
+              const allCandidates = Array.from(
+                new Set([
+                  ...(acc.candidateModels ?? []),
+                  ...(preset?.candidateModels ?? []),
+                  ...(preset?.defaultModels ?? []),
+                  ...enabledModels,
+                ]),
+              );
+
               return (
                 <div
-                  key={`${acc.channelId}-${acc.slotId}`}
+                  key={slotKey}
                   style={{
-                    padding: '14px',
+                    padding: '16px',
                     borderRadius: '8px',
                     border: '1px solid rgba(128,128,128,0.25)',
                     background:
                       'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.04))',
                     display: 'flex',
                     flexDirection: 'column',
-                    justifyContent: 'space-between',
                     gap: '10px',
                   }}
                 >
-                  <div>
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        marginBottom: '6px',
-                      }}
-                    >
-                      <strong style={{ fontSize: '14px' }}>{acc.label}</strong>
-                      <Tag tone={acc.state === 'Healthy' ? 'success' : 'warning'}>
-                        {acc.state === 'Healthy' ? '🟢 套餐正常' : acc.state}
-                      </Tag>
-                    </div>
-
-                    <div style={{ fontSize: '12px', opacity: 0.8, marginBottom: '4px' }}>
-                      服务商: {preset?.name ?? acc.channelId} · 套餐: {preset?.planName ?? '官方订阅'}
-                    </div>
-
-                    {acc.baseUrl && (
-                      <div
-                        style={{
-                          fontSize: '11px',
-                          opacity: 0.65,
-                          fontFamily: 'monospace',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                          marginBottom: '6px',
-                        }}
-                        title={acc.baseUrl}
-                      >
-                        {acc.baseUrl}
-                      </div>
-                    )}
-
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                      {(acc.models ?? ['默认模型']).slice(0, 3).map((m) => (
-                        <span
-                          key={m}
-                          style={{
-                            fontSize: '11px',
-                            padding: '1px 6px',
-                            borderRadius: '4px',
-                            background: 'rgba(128,128,128,0.15)',
-                          }}
-                        >
-                          {m}
-                        </span>
-                      ))}
-                      {(acc.models?.length ?? 0) > 3 && (
-                        <span style={{ fontSize: '11px', opacity: 0.6 }}>
-                          +{(acc.models?.length ?? 0) - 3}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
                   <div
                     style={{
                       display: 'flex',
                       justifyContent: 'space-between',
-                      alignItems: 'center',
-                      paddingTop: '8px',
-                      borderTop: '1px solid rgba(128,128,128,0.15)',
+                      alignItems: 'flex-start',
+                      flexWrap: 'wrap',
+                      gap: '8px',
                     }}
                   >
-                    <span style={{ fontSize: '12px', opacity: 0.75 }}>
-                      额度: {acc.quotas[0]?.remainingPercent ?? 100}%
-                    </span>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => {
-                        if (
-                          window.confirm(
-                            `确定要移除账号 "${acc.label}" 吗？`,
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                        <strong style={{ fontSize: '15px' }}>{acc.label}</strong>
+                        <Tag tone={acc.state === 'Healthy' ? 'success' : 'warning'}>
+                          {acc.state === 'Healthy' ? '🟢 套餐正常' : acc.state}
+                        </Tag>
+                      </div>
+                      <div style={{ fontSize: '12px', opacity: 0.8 }}>
+                        服务商: {preset?.name ?? acc.channelId} · 套餐: {preset?.planName ?? '官方订阅'}
+                      </div>
+                      {acc.baseUrl && (
+                        <div
+                          style={{
+                            fontSize: '11px',
+                            opacity: 0.65,
+                            fontFamily: 'monospace',
+                            marginTop: '2px',
+                          }}
+                        >
+                          接口: {acc.baseUrl}
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditingSlotKey((prev) =>
+                            prev === slotKey ? null : slotKey,
                           )
-                        ) {
-                          void removeAccount(acc.channelId, acc.slotId);
                         }
-                      }}
-                      style={{
-                        padding: '3px 8px',
-                        borderRadius: '4px',
-                        border: '1px solid rgba(239,68,68,0.3)',
-                        background: 'transparent',
-                        color: '#ef4444',
-                        fontSize: '11px',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      删除
-                    </button>
+                        style={{
+                          padding: '5px 12px',
+                          borderRadius: '5px',
+                          border: isEditingModels
+                            ? '1.5px solid #10b981'
+                            : '1px solid rgba(16,185,129,0.5)',
+                          background: isEditingModels
+                            ? 'rgba(16,185,129,0.15)'
+                            : 'transparent',
+                          color: '#10b981',
+                          fontWeight: 600,
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {isEditingModels
+                          ? '✕ 收起模型配置'
+                          : `⚙️ 自定义展示模型 (共 ${allCandidates.length} 个候选)`}
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `确定要移除已连接的官方账号 "${acc.label}" 吗？`,
+                            )
+                          ) {
+                            void removeAccount(acc.channelId, acc.slotId);
+                          }
+                        }}
+                        style={{
+                          padding: '5px 10px',
+                          borderRadius: '5px',
+                          border: '1px solid rgba(239,68,68,0.3)',
+                          background: 'transparent',
+                          color: '#ef4444',
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        删除
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Real Quota Display Banner */}
+                  <div
+                    style={{
+                      padding: '8px 12px',
+                      borderRadius: '6px',
+                      background: 'var(--dsw-alias-bg-layer-1, rgba(128,128,128,0.08))',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: '8px',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontSize: '12px', fontWeight: 600, color: '#10b981' }}>
+                        📊 配额状态: {quotaLabel}
+                      </span>
+                      {quotaSnapshot && quotaSnapshot.remainingPercent < 100 && (
+                        <Tag tone={quotaSnapshot.remainingPercent < 20 ? 'danger' : 'warning'}>
+                          剩余 {quotaSnapshot.remainingPercent}%
+                        </Tag>
+                      )}
+                    </div>
+                    <span style={{ fontSize: '11px', opacity: 0.65 }}>
+                      最近使用: {acc.lastUsedAt ? new Date(acc.lastUsedAt).toLocaleTimeString() : '刚刚就绪'}
+                    </span>
+                  </div>
+
+                  {/* Enabled Models List */}
+                  <div>
+                    <div style={{ fontSize: '12px', opacity: 0.75, marginBottom: '6px' }}>
+                      当前在 DSH 启用的模型 ({enabledModels.length} 个):
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                      {enabledModels.map((m) => (
+                        <span
+                          key={m}
+                          style={{
+                            fontSize: '11px',
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            background: 'rgba(16,185,129,0.12)',
+                            color: '#10b981',
+                            border: '1px solid rgba(16,185,129,0.3)',
+                            fontWeight: 500,
+                          }}
+                        >
+                          ✓ {m}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Model Visibility Editor (Expanded) */}
+                  {isEditingModels && (
+                    <AccountModelEditor
+                      channelId={acc.channelId}
+                      slotId={acc.slotId}
+                      label={acc.label}
+                      currentModels={acc.models ?? []}
+                      candidateModels={allCandidates}
+                      defaultModels={preset?.defaultModels ?? []}
+                      onSave={async (newModels) => {
+                        await updateModels(acc.channelId, acc.slotId, newModels);
+                      }}
+                      onClose={() => setEditingSlotKey(null)}
+                    />
+                  )}
                 </div>
               );
             })}

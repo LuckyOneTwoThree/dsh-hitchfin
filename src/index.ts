@@ -249,6 +249,8 @@ export class HitchfinHostController implements HitchfinRouteController {
         hasToken: d.hasToken,
         baseUrl: d.baseUrl,
         models: d.models,
+        candidateModels: d.candidateModels,
+        quotas: d.quotas,
         slotId: d.slotId,
         label: d.label,
       }));
@@ -262,6 +264,15 @@ export class HitchfinHostController implements HitchfinRouteController {
     accountIds: string[] | 'all',
   ): Promise<HitchfinStatusSnapshot> {
     await importDiscoveredAccountsToPool(accountIds, this.pool);
+    return this.refreshAndSyncRoutes();
+  }
+
+  async updateAccountModels(
+    channelId: string,
+    slotId: string,
+    models: string[],
+  ): Promise<HitchfinStatusSnapshot> {
+    await this.pool.updateAccountModels(channelId, slotId, models);
     return this.refreshAndSyncRoutes();
   }
 
@@ -283,6 +294,13 @@ export class HitchfinHostController implements HitchfinRouteController {
         accessToken: poll.accessToken,
         baseUrl: 'https://api.githubcopilot.com',
         models: ['copilot-gpt-4o', 'copilot-claude-3.5-sonnet', 'copilot-o1'],
+        candidateModels: [
+          'copilot-gpt-4o',
+          'copilot-claude-3.5-sonnet',
+          'copilot-o1',
+          'copilot-gpt-4o-mini',
+          'copilot-o3-mini',
+        ],
         updatedAt: Date.now(),
       });
       await this.refreshAndSyncRoutes();
@@ -503,6 +521,7 @@ export class HitchfinHostController implements HitchfinRouteController {
     accessToken?: string;
     baseUrl?: string;
     models?: string[];
+    candidateModels?: string[];
   }): Promise<HitchfinStatusSnapshot> {
     const rawChannel = params.channelId.trim();
     const cleanChannelId = rawChannel.replace(/^hitchfin[-/]/, '');
@@ -524,6 +543,11 @@ export class HitchfinHostController implements HitchfinRouteController {
         ? params.models.map((m) => m.trim()).filter(Boolean)
         : preset?.defaultModels ?? ['default-model'];
 
+    const candidateModels =
+      params.candidateModels && params.candidateModels.length > 0
+        ? params.candidateModels.map((m) => m.trim()).filter(Boolean)
+        : preset?.candidateModels ?? models;
+
     await this.pool.addAutonomousAccount({
       channelId: cleanChannelId,
       slotId: cleanSlotId,
@@ -533,6 +557,7 @@ export class HitchfinHostController implements HitchfinRouteController {
       accessToken: params.accessToken?.trim(),
       baseUrl,
       models,
+      candidateModels,
       updatedAt: Date.now(),
     });
 

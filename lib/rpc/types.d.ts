@@ -21,6 +21,7 @@ export interface AccountSlotSummary {
     lastUsedAt?: number;
     baseUrl?: string;
     models?: string[];
+    candidateModels?: string[];
 }
 export interface AutonomousAccountConfig {
     channelId: string;
@@ -32,6 +33,7 @@ export interface AutonomousAccountConfig {
     refreshToken?: string;
     baseUrl?: string;
     models?: string[];
+    candidateModels?: string[];
     updatedAt: number;
 }
 export interface DiscoveredSubscriptionSummary {
@@ -44,6 +46,8 @@ export interface DiscoveredSubscriptionSummary {
     hasToken: boolean;
     baseUrl: string;
     models: string[];
+    candidateModels?: string[];
+    quotas?: QuotaWindowSnapshot[];
     slotId: string;
     label: string;
 }
@@ -53,6 +57,7 @@ export interface ChannelPreset {
     planName: string;
     defaultBaseUrl: string;
     defaultModels: string[];
+    candidateModels: string[];
     authType: 'oauth' | 'bearer' | 'api-key';
     placeholder: string;
     description: string;

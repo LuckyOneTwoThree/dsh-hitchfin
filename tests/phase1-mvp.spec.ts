@@ -518,6 +518,29 @@ describe('Phase 1 MVP Integration Suite (M1.2 - M1.4)', () => {
     expect(addCodex.status).toBe(200);
     expect(addCodex.json.accounts.length).toBe(2);
 
+    // 2.1 Update account models via /api/hitchfin/account/update-models
+    const updateModelsRes = await callRoute(
+      '/api/hitchfin/account/update-models',
+      'POST',
+      {
+        channelId: 'openai-codex',
+        slotId: addCodex.json.accounts[1].slotId,
+        models: ['gpt-4o', 'o3-mini', 'gpt-4o-mini'],
+      },
+    );
+    expect(updateModelsRes.status).toBe(200);
+    const updatedAccount = updateModelsRes.json.accounts.find(
+      (a: any) => a.channelId === 'openai-codex',
+    );
+    expect(updatedAccount.models).toEqual(['gpt-4o', 'o3-mini', 'gpt-4o-mini']);
+
+    const codexModels = await ctx.llm.listModels('hitchfin-openai-codex');
+    expect(codexModels.map((m) => m.id)).toEqual([
+      'gpt-4o',
+      'o3-mini',
+      'gpt-4o-mini',
+    ]);
+
     // 3. Update routing strategy to rotate
     const stratRes = await callRoute(
       '/api/hitchfin/routing/strategy',

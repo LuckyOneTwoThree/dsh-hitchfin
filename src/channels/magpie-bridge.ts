@@ -234,9 +234,9 @@ export function registerBridgeSlotsOnPool(
         state: 'Healthy',
         quotas: [
           {
-            windowLabel: '5h',
-            remainingPercent: 85,
-            confidence: 'estimated',
+            windowLabel: '套餐可用',
+            remainingPercent: 100,
+            confidence: 'exact',
           },
         ],
       });

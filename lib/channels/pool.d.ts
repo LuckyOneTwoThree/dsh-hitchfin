@@ -11,6 +11,7 @@ export interface StoredAccountRecord {
     apiKey?: string;
     baseUrl?: string;
     models?: string[];
+    candidateModels?: string[];
     quotas?: QuotaWindowSnapshot[];
     updatedAt: number;
 }
@@ -41,7 +42,13 @@ export declare class AccountPool {
      * Save or update an autonomous subscription account.
      * Persists the token into `accountCredentialKey` and updates `accounts-registry`.
      */
-    addAutonomousAccount(account: AutonomousAccountConfig): Promise<void>;
+    addAutonomousAccount(account: AutonomousAccountConfig & {
+        quotas?: QuotaWindowSnapshot[];
+    }): Promise<void>;
+    /**
+     * Update the enabled model list for an account (model visibility toggle).
+     */
+    updateAccountModels(channelId: string, slotId: string, models: string[]): Promise<boolean>;
     /**
      * Remove an autonomous account and delete its credential record.
      */

@@ -20,6 +20,7 @@ export interface StoredAccountRecord {
   apiKey?: string;
   baseUrl?: string;
   models?: string[];
+  candidateModels?: string[];
   quotas?: QuotaWindowSnapshot[];
   updatedAt: number;
 }
@@ -183,7 +184,9 @@ export class AccountPool {
    * Save or update an autonomous subscription account.
    * Persists the token into `accountCredentialKey` and updates `accounts-registry`.
    */
-  async addAutonomousAccount(account: AutonomousAccountConfig): Promise<void> {
+  async addAutonomousAccount(
+    account: AutonomousAccountConfig & { quotas?: QuotaWindowSnapshot[] },
+  ): Promise<void> {
     const cid = this.compositeId(account.channelId, account.slotId);
     this.autonomousAccounts.set(cid, { ...account });
 
@@ -193,16 +196,19 @@ export class AccountPool {
       channelId: account.channelId,
       label: account.label,
       state: 'Healthy',
-      quotas: [
-        {
-          windowLabel: '额度正常',
-          remainingPercent: 100,
-          confidence: 'exact',
-        },
-      ],
+      quotas: account.quotas && account.quotas.length > 0
+        ? [...account.quotas]
+        : [
+            {
+              windowLabel: '额度正常',
+              remainingPercent: 100,
+              confidence: 'exact',
+            },
+          ],
       lastUsedAt: Date.now(),
       baseUrl: account.baseUrl,
       models: account.models ? [...account.models] : undefined,
+      candidateModels: account.candidateModels ? [...account.candidateModels] : undefined,
     });
 
     // 2. Persist to credentials if service is present
@@ -221,12 +227,48 @@ export class AccountPool {
           refreshToken: account.refreshToken,
           baseUrl: account.baseUrl,
           models: account.models ? [...account.models] : undefined,
+          candidateModels: account.candidateModels ? [...account.candidateModels] : undefined,
           updatedAt: account.updatedAt,
         }),
       );
 
       await this.saveAccountsRegistry();
     }
+  }
+
+  /**
+   * Update the enabled model list for an account (model visibility toggle).
+   */
+  async updateAccountModels(
+    channelId: string,
+    slotId: string,
+    models: string[],
+  ): Promise<boolean> {
+    const cid = this.compositeId(channelId, slotId);
+    const existingAuto = this.autonomousAccounts.get(cid);
+    if (existingAuto) {
+      existingAuto.models = [...models];
+      this.autonomousAccounts.set(cid, existingAuto);
+    }
+    const slot = this.slots.get(cid);
+    if (slot) {
+      slot.models = [...models];
+      this.slots.set(cid, slot);
+    }
+
+    const credentials = this.getCredentials();
+    if (credentials) {
+      await this.modifyAccountCredential(channelId, slotId, (curr) => {
+        if (!curr) return undefined;
+        return {
+          ...curr,
+          models: [...models],
+          updatedAt: Date.now(),
+        };
+      });
+      await this.saveAccountsRegistry();
+    }
+    return true;
   }
 
   /**
@@ -258,6 +300,7 @@ export class AccountPool {
       authType: a.authType,
       baseUrl: a.baseUrl,
       models: a.models,
+      candidateModels: a.candidateModels,
       updatedAt: a.updatedAt,
     }));
     await credentials.modifyRecord(key, async () => ({
@@ -293,6 +336,7 @@ export class AccountPool {
           authType?: 'api-key' | 'oauth' | 'bearer';
           baseUrl?: string;
           models?: string[];
+          candidateModels?: string[];
           updatedAt?: number;
         }>;
       };
@@ -319,6 +363,7 @@ export class AccountPool {
           refreshToken: cred?.refreshToken,
           baseUrl: entry.baseUrl ?? cred?.baseUrl,
           models: entry.models ?? cred?.models,
+          candidateModels: entry.candidateModels ?? cred?.candidateModels,
           updatedAt: entry.updatedAt ?? Date.now(),
         };
 
@@ -339,6 +384,7 @@ export class AccountPool {
           lastUsedAt: config.updatedAt,
           baseUrl: config.baseUrl,
           models: config.models ? [...config.models] : undefined,
+          candidateModels: config.candidateModels ? [...config.candidateModels] : undefined,
         });
       }
     } catch {

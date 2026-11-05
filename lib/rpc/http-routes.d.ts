@@ -29,8 +29,10 @@ export interface HitchfinRouteController {
         accessToken?: string;
         baseUrl?: string;
         models?: string[];
+        candidateModels?: string[];
     }): Promise<HitchfinStatusSnapshot>;
     removeAccount(channelId: string, slotId: string): Promise<HitchfinStatusSnapshot>;
+    updateAccountModels(channelId: string, slotId: string, models: string[]): Promise<HitchfinStatusSnapshot>;
     updateRoutingStrategy(strategy: RoutingStrategy): Promise<HitchfinStatusSnapshot>;
     getDiscoveredSubscriptions(): DiscoveredSubscriptionSummary[];
     importDiscoveredSubscriptions(accountIds: string[] | 'all'): Promise<HitchfinStatusSnapshot>;

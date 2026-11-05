@@ -41,10 +41,16 @@ export interface HitchfinRouteController {
     accessToken?: string;
     baseUrl?: string;
     models?: string[];
+    candidateModels?: string[];
   }): Promise<HitchfinStatusSnapshot>;
   removeAccount(
     channelId: string,
     slotId: string,
+  ): Promise<HitchfinStatusSnapshot>;
+  updateAccountModels(
+    channelId: string,
+    slotId: string,
+    models: string[],
   ): Promise<HitchfinStatusSnapshot>;
   updateRoutingStrategy(
     strategy: RoutingStrategy,
@@ -130,12 +136,24 @@ export function sameOrigin(
     return false;
   }
   const origin = request.headers.origin;
-  if (origin === undefined) {
+  if (origin === undefined || origin === 'null' || origin === '') {
     return true;
   }
   try {
     const originUrl = new URL(origin);
     if (originUrl.host === host) {
+      return true;
+    }
+    // Allow loopback origins (localhost, 127.0.0.1)
+    if (loopbackAuthority(originUrl.host) || loopbackAuthority(originUrl.hostname)) {
+      return true;
+    }
+    // Allow local desktop app schemes (dsh:, app:, vscode-file:, vscode-webview:, file:)
+    if (
+      ['dsh:', 'app:', 'vscode-file:', 'vscode-webview:', 'file:'].includes(
+        originUrl.protocol,
+      )
+    ) {
       return true;
     }
     if (originUrl.port === '' && host !== undefined && loopbackAuthority(host)) {
@@ -144,6 +162,10 @@ export function sameOrigin(
     }
     return false;
   } catch {
+    // If origin is not a standard URL (e.g. Electron internal identifier), but host is loopback, trust it
+    if (host !== undefined && loopbackAuthority(host)) {
+      return true;
+    }
     return false;
   }
 }
@@ -327,6 +349,9 @@ export function mountHitchfinHttpRoutes(
           const models = Array.isArray(body.models)
             ? (body.models.filter((m) => typeof m === 'string') as string[])
             : undefined;
+          const candidateModels = Array.isArray(body.candidateModels)
+            ? (body.candidateModels.filter((m) => typeof m === 'string') as string[])
+            : undefined;
 
           const snapshot = await controller.addAccount({
             channelId: body.channelId.trim(),
@@ -341,6 +366,7 @@ export function mountHitchfinHttpRoutes(
             accessToken,
             baseUrl,
             models,
+            candidateModels,
           });
           sendJson(response, 200, snapshot);
         } catch (err) {
@@ -380,6 +406,53 @@ export function mountHitchfinHttpRoutes(
           const snapshot = await controller.removeAccount(
             body.channelId.trim(),
             body.slotId.trim(),
+          );
+          sendJson(response, 200, snapshot);
+        } catch (err) {
+          sendJson(response, 400, {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    }),
+
+    webServer.register({
+      kind: 'exact',
+      path: '/api/hitchfin/account/update-models',
+      handler: async (request, response) => {
+        if (request.method !== 'POST') {
+          response.writeHead(405, { allow: 'POST' });
+          response.end();
+          return;
+        }
+        if (!sameOrigin(request, getTrustedHosts())) {
+          sendJson(response, 403, { error: 'untrusted origin' });
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          if (
+            typeof body.channelId !== 'string' ||
+            body.channelId.trim() === ''
+          ) {
+            sendJson(response, 400, { error: 'channelId is required' });
+            return;
+          }
+          if (typeof body.slotId !== 'string' || body.slotId.trim() === '') {
+            sendJson(response, 400, { error: 'slotId is required' });
+            return;
+          }
+          if (!Array.isArray(body.models)) {
+            sendJson(response, 400, { error: 'models array is required' });
+            return;
+          }
+          const cleanModels = body.models
+            .map((m) => String(m).trim())
+            .filter(Boolean);
+          const snapshot = await controller.updateAccountModels(
+            body.channelId.trim(),
+            body.slotId.trim(),
+            cleanModels,
           );
           sendJson(response, 200, snapshot);
         } catch (err) {

@@ -81,6 +81,7 @@ export declare class HitchfinHostController implements HitchfinRouteController {
     getDiscoveredSubscriptionsSummary(): DiscoveredSubscriptionSummary[];
     getDiscoveredSubscriptions(): DiscoveredSubscriptionSummary[];
     importDiscoveredSubscriptions(accountIds: string[] | 'all'): Promise<HitchfinStatusSnapshot>;
+    updateAccountModels(channelId: string, slotId: string, models: string[]): Promise<HitchfinStatusSnapshot>;
     startCopilotDeviceFlow(): Promise<import("./channels/github-copilot-auth.js").DeviceCodeStartResult>;
     pollCopilotDeviceFlow(deviceCode: string): Promise<import("./channels/github-copilot-auth.js").DeviceCodePollResult>;
     getStatusSnapshot(): HitchfinStatusSnapshot;
@@ -98,6 +99,7 @@ export declare class HitchfinHostController implements HitchfinRouteController {
         accessToken?: string;
         baseUrl?: string;
         models?: string[];
+        candidateModels?: string[];
     }): Promise<HitchfinStatusSnapshot>;
     removeAccount(channelId: string, slotId: string): Promise<HitchfinStatusSnapshot>;
     updateRoutingStrategy(strategy: RoutingStrategy): Promise<HitchfinStatusSnapshot>;

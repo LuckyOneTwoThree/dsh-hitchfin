@@ -30,6 +30,7 @@ export interface AccountSlotSummary {
   lastUsedAt?: number;
   baseUrl?: string;
   models?: string[];
+  candidateModels?: string[];
 }
 
 export interface AutonomousAccountConfig {
@@ -42,6 +43,7 @@ export interface AutonomousAccountConfig {
   refreshToken?: string;
   baseUrl?: string;
   models?: string[];
+  candidateModels?: string[];
   updatedAt: number;
 }
 
@@ -55,6 +57,8 @@ export interface DiscoveredSubscriptionSummary {
   hasToken: boolean;
   baseUrl: string;
   models: string[];
+  candidateModels?: string[];
+  quotas?: QuotaWindowSnapshot[];
   slotId: string;
   label: string;
 }
@@ -65,6 +69,7 @@ export interface ChannelPreset {
   planName: string;
   defaultBaseUrl: string;
   defaultModels: string[];
+  candidateModels: string[];
   authType: 'oauth' | 'bearer' | 'api-key';
   placeholder: string;
   description: string;
@@ -77,6 +82,15 @@ export const CHANNEL_PRESETS: ChannelPreset[] = [
     planName: 'ChatGPT Plus / Team / Pro 套餐',
     defaultBaseUrl: 'https://api.openai.com/v1',
     defaultModels: ['gpt-4o', 'gpt-4o-mini', 'o1', 'o3-mini'],
+    candidateModels: [
+      'gpt-4o',
+      'gpt-4o-mini',
+      'o1',
+      'o1-mini',
+      'o3-mini',
+      'gpt-4-turbo',
+      'gpt-4.5-preview',
+    ],
     authType: 'oauth',
     placeholder: 'ChatGPT Session Token 或 Refresh Token',
     description: '官方 ChatGPT 账号套餐，支持 GPT-4o / o1 / o3-mini 模型',
@@ -87,6 +101,13 @@ export const CHANNEL_PRESETS: ChannelPreset[] = [
     planName: 'Copilot Individual / Business 订阅',
     defaultBaseUrl: 'https://api.githubcopilot.com',
     defaultModels: ['copilot-gpt-4o', 'copilot-claude-3.5-sonnet', 'copilot-o1'],
+    candidateModels: [
+      'copilot-gpt-4o',
+      'copilot-claude-3.5-sonnet',
+      'copilot-o1',
+      'copilot-gpt-4o-mini',
+      'copilot-o3-mini',
+    ],
     authType: 'oauth',
     placeholder: 'GitHub 设备码授权或 ghu_... 令牌',
     description: 'GitHub Copilot 官方订阅，支持设备码一键授权',
@@ -100,6 +121,36 @@ export const CHANNEL_PRESETS: ChannelPreset[] = [
       'Doubao-Seed-2.1-Pro',
       'Doubao-Seed-2.1-Turbo',
       'Doubao-Seed-Evolving',
+      'deepseek-v4.1-flash',
+    ],
+    candidateModels: [
+      'Doubao-Seed-2.1-Pro',
+      'Doubao-Seed-2.1-Pro-max',
+      'Doubao-Seed-2.1-Turbo',
+      'Doubao-Seed-Evolving',
+      'Doubao-Seed-Evolving-max',
+      'Doubao_1_6',
+      'Doubao-Seed-Code',
+      'deepseek-v4.1-flash',
+      'deepseek-v4.1-flash-max',
+      'DeepSeek-V4-Flash',
+      'DeepSeek-V4-Pro',
+      'glm-5.3-flash',
+      'glm-5.3-flash-max',
+      'glm-5.3',
+      'glm-5.2',
+      'mimo-v2.6-flash',
+      'mimo-v2.6-flash-max',
+      'mimo-v2.6-pro',
+      'mimo-v2.6-pro-max',
+      'minimax-m3.1-flash',
+      'minimax-m3',
+      'kimi-k3.1-pro',
+      'kimi-k3',
+      'kimi-k2.7-code',
+      'qwen3.8-flash',
+      'qwen3.8-max',
+      'qwen-3.7-plus',
     ],
     authType: 'oauth',
     placeholder: 'Trae 官方网页授权或 Cloud-IDE-JWT',
@@ -110,7 +161,22 @@ export const CHANNEL_PRESETS: ChannelPreset[] = [
     name: 'WorkBuddy (腾讯混元)',
     planName: 'WorkBuddy 商业 / 免费套餐',
     defaultBaseUrl: 'https://copilot.tencent.com/v2',
-    defaultModels: ['hy4free', 'hy4std', 'deepseek-v4.1-flash'],
+    defaultModels: ['hy4free', 'hy4std', 'hy3', 'deepseek-v4.1-flash'],
+    candidateModels: [
+      'hy4free',
+      'hy4std',
+      'hy3',
+      'hy3-x',
+      'deepseek-v4.1-flash',
+      'deepseek-v4-pro',
+      'glm-5.3-flash',
+      'glm-5.3',
+      'glm-5.2',
+      'minimax-m3.1-flash',
+      'minimax-m3',
+      'kimi-k3.1-pro',
+      'mimo-v2.6-pro',
+    ],
     authType: 'oauth',
     placeholder: '腾讯 WorkBuddy 官方网页授权或 Token',
     description: '腾讯混元 WorkBuddy 官方订阅，支持 DeepSeek 与混元大模型',
@@ -121,6 +187,15 @@ export const CHANNEL_PRESETS: ChannelPreset[] = [
     planName: '智谱 BigModel GLM Coding Plan',
     defaultBaseUrl: 'https://open.bigmodel.cn/api/anthropic',
     defaultModels: ['GLM-5.3-Flash', 'GLM-5.2', 'GLM-5-Turbo'],
+    candidateModels: [
+      'GLM-5.3-Flash',
+      'GLM-5.2',
+      'GLM-5-Turbo',
+      'glm-5.1',
+      'glm-5',
+      'glm-4.7',
+      'glm-4.6',
+    ],
     authType: 'oauth',
     placeholder: '智谱 ZCode Coding Plan Token',
     description: '智谱 AI 官方 GLM Coding Plan 编程套餐',
@@ -135,6 +210,12 @@ export const CHANNEL_PRESETS: ChannelPreset[] = [
       'claude-3-5-haiku-20241022',
       'claude-3-opus-20240229',
     ],
+    candidateModels: [
+      'claude-3-7-sonnet',
+      'claude-3-5-sonnet-20241022',
+      'claude-3-5-haiku-20241022',
+      'claude-3-opus-20240229',
+    ],
     authType: 'oauth',
     placeholder: 'Claude sessionKey 或 Setup Token',
     description: 'Anthropic 官方 Claude Pro / Team 订阅套餐',
@@ -145,6 +226,13 @@ export const CHANNEL_PRESETS: ChannelPreset[] = [
     planName: 'Gemini Advanced 官方套餐',
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     defaultModels: ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
+    candidateModels: [
+      'gemini-2.0-flash',
+      'gemini-2.0-flash-thinking-exp',
+      'gemini-1.5-pro',
+      'gemini-1.5-flash',
+      'gemini-1.5-flash-8b',
+    ],
     authType: 'oauth',
     placeholder: 'Google OAuth Token 或 Gemini 凭证',
     description: 'Google 官方 Gemini Advanced 订阅与 Code Assist 套餐',
@@ -155,6 +243,7 @@ export const CHANNEL_PRESETS: ChannelPreset[] = [
     planName: 'DeepSeek 官方平台',
     defaultBaseUrl: 'https://api.deepseek.com',
     defaultModels: ['deepseek-chat', 'deepseek-reasoner'],
+    candidateModels: ['deepseek-chat', 'deepseek-reasoner'],
     authType: 'api-key',
     placeholder: 'sk-...',
     description: 'DeepSeek 官方开放平台 (V3 / R1 推理)',
@@ -165,6 +254,7 @@ export const CHANNEL_PRESETS: ChannelPreset[] = [
     planName: '第三方兼容接口',
     defaultBaseUrl: 'https://api.openai.com/v1',
     defaultModels: ['gpt-4o', 'deepseek-chat'],
+    candidateModels: ['gpt-4o', 'gpt-4o-mini', 'deepseek-chat', 'deepseek-reasoner', 'claude-3-5-sonnet'],
     authType: 'api-key',
     placeholder: 'Bearer Token / API Key',
     description: '本地或中转服务（Ollama、vLLM、OneAPI 等）',
