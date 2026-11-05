@@ -3,6 +3,7 @@ import { Tag } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
   type ChannelPreset,
   CHANNEL_PRESETS,
+  type DiscoveredSubscriptionSummary,
   type HitchfinRuntimeMode,
   type HitchfinStatusSnapshot,
   type RoutingStrategy,
@@ -31,6 +32,7 @@ const FALLBACK_SNAPSHOT: HitchfinStatusSnapshot = {
   magpieEndpoint: 'http://127.0.0.1:3425',
   defaultStrategy: 'smart',
   presets: CHANNEL_PRESETS,
+  discoveredSubscriptions: [],
   channels: [],
   accounts: [],
   routingGroups: [],
@@ -69,7 +71,7 @@ async function fetchHitchfinStatus(): Promise<HitchfinStatusSnapshot> {
       return data;
     }
   } catch {
-    // Fallback to cached snapshot when running in test DOM
+    // Fallback to cached snapshot
   }
   return cachedSnapshot;
 }
@@ -210,6 +212,69 @@ function useHitchfinStatus() {
     }
   }, []);
 
+  const importSubscriptions = useCallback(
+    async (accountIds: string[] | 'all') => {
+      if (typeof fetch !== 'function') return;
+      setBusy(true);
+      try {
+        const res = await fetch('/api/hitchfin/import-subscriptions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            accountIds === 'all' ? { all: true } : { accountIds },
+          ),
+        });
+        if (res.ok) {
+          notifySnapshot((await res.json()) as HitchfinStatusSnapshot);
+          return true;
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
+  const startCopilotAuth = useCallback(async () => {
+    if (typeof fetch !== 'function') throw new Error('fetch unavailable');
+    const res = await fetch('/api/hitchfin/auth/copilot/device-code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    if (res.ok) {
+      return (await res.json()) as {
+        deviceCode: string;
+        userCode: string;
+        verificationUri: string;
+        expiresIn: number;
+        interval: number;
+      };
+    }
+    throw new Error('启动 GitHub Copilot 认证失败');
+  }, []);
+
+  const pollCopilotAuth = useCallback(async (deviceCode: string) => {
+    if (typeof fetch !== 'function') throw new Error('fetch unavailable');
+    const res = await fetch('/api/hitchfin/auth/copilot/poll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceCode }),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as {
+        status: 'pending' | 'authorized' | 'expired' | 'error';
+        accessToken?: string;
+        error?: string;
+      };
+      if (data.status === 'authorized') {
+        void fetchHitchfinStatus();
+      }
+      return data;
+    }
+    throw new Error('轮询 Copilot 状态异常');
+  }, []);
+
   return {
     status,
     busy,
@@ -219,6 +284,9 @@ function useHitchfinStatus() {
     addAccount,
     removeAccount,
     updateStrategy,
+    importSubscriptions,
+    startCopilotAuth,
+    pollCopilotAuth,
   };
 }
 
@@ -249,7 +317,7 @@ export function HitchfinModelLabel({ provider, model }: ModelLabelProps) {
   const topQuota = slot?.quotas?.[0];
   const badgeText = topQuota
     ? `${topQuota.windowLabel} ${topQuota.remainingPercent}%`
-    : '额度正常';
+    : '套餐额度充沛';
   const tone =
     topQuota && topQuota.remainingPercent <= 20 ? 'warning' : 'info';
 
@@ -301,9 +369,9 @@ export function HitchfinComposerQuotaCapsule() {
           background: 'transparent',
           cursor: 'pointer',
         }}
-        title="Hitchfin 订阅额度与账号池"
+        title="Hitchfin 官方套餐额度与订阅池"
       >
-        HF · {summaryPercent}%
+        HF 套餐 · {summaryPercent}%
       </button>
       {open && (
         <div
@@ -311,7 +379,7 @@ export function HitchfinComposerQuotaCapsule() {
             position: 'absolute',
             bottom: '120%',
             right: 0,
-            minWidth: '260px',
+            minWidth: '270px',
             padding: '12px 14px',
             borderRadius: '8px',
             border: '1px solid rgba(128,128,128,0.25)',
@@ -330,7 +398,7 @@ export function HitchfinComposerQuotaCapsule() {
               marginBottom: '8px',
             }}
           >
-            <strong>Hitchfin 订阅池</strong>
+            <strong>官方套餐订阅池</strong>
             <button
               type="button"
               disabled={busy}
@@ -348,7 +416,7 @@ export function HitchfinComposerQuotaCapsule() {
             </button>
           </div>
           <div style={{ marginBottom: '4px' }}>
-            已接入账号: {status.accounts.length} · 活跃可用: {healthyCount}
+            已接入套餐账号: {status.accounts.length} · 正常可用: {healthyCount}
           </div>
           <div style={{ marginBottom: '4px' }}>
             调度策略: {status.defaultStrategy ?? 'smart'}
@@ -364,8 +432,8 @@ export function HitchfinComposerQuotaCapsule() {
 }
 
 /**
- * Unified Single Settings Dashboard:
- * Replaces fragmented tabs with one clean, cohesive management interface.
+ * Single Unified Settings Dashboard for AI Subscription Plans.
+ * Connects directly to ChatGPT Plus/Team, Copilot, Trae, WorkBuddy, ZCode official subscriptions.
  */
 export function HitchfinUnifiedSettingsDashboard() {
   const {
@@ -377,48 +445,127 @@ export function HitchfinUnifiedSettingsDashboard() {
     addAccount,
     removeAccount,
     updateStrategy,
+    importSubscriptions,
+    startCopilotAuth,
+    pollCopilotAuth,
   } = useHitchfinStatus();
 
-  // Add Account Form State
-  const [showAddForm, setShowAddForm] = useState(status.accounts.length === 0);
-  const [selectedChannel, setSelectedChannel] = useState('deepseek');
+  // Add Subscription Mode
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [activeLoginTab, setActiveLoginTab] = useState<'oauth' | 'token'>('oauth');
+
+  // Manual Token Form State
+  const [selectedChannel, setSelectedChannel] = useState('codex');
   const [accountLabel, setAccountLabel] = useState('');
-  const [authSecret, setAuthSecret] = useState('');
+  const [sessionToken, setSessionToken] = useState('');
   const [showSecret, setShowSecret] = useState(false);
-  const [baseUrlInput, setBaseUrlInput] = useState('https://api.deepseek.com');
-  const [modelsInput, setModelsInput] = useState(
-    'deepseek-chat, deepseek-reasoner',
-  );
+  const [baseUrlInput, setBaseUrlInput] = useState('https://api.openai.com/v1');
+  const [modelsInput, setModelsInput] = useState('gpt-4o, gpt-4o-mini, o1, o3-mini');
   const [formError, setFormError] = useState('');
   const [formSuccess, setFormSuccess] = useState('');
+
+  // Copilot Device Code State
+  const [copilotFlow, setCopilotFlow] = useState<{
+    userCode: string;
+    verificationUri: string;
+    deviceCode: string;
+    status: 'idle' | 'waiting' | 'success' | 'expired' | 'error';
+    errorMsg?: string;
+  } | null>(null);
 
   // Advanced section collapse state
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  // Sync preset defaults when changing channel selection
+  // Handle Channel Preset Select
   const handleChannelChange = (channelId: string) => {
     setSelectedChannel(channelId);
     const preset = CHANNEL_PRESETS.find((p) => p.channelId === channelId);
     if (preset) {
       setBaseUrlInput(preset.defaultBaseUrl);
       setModelsInput(preset.defaultModels.join(', '));
-      if (!accountLabel || CHANNEL_PRESETS.some((p) => p.name === accountLabel)) {
-        setAccountLabel(preset.name);
-      }
+      setAccountLabel(preset.name);
     }
   };
 
-  const handleSaveAccount = async (e: React.FormEvent) => {
+  // One-click import discovered accounts
+  const handleImportAllDiscovered = async () => {
+    setFormSuccess('');
+    setFormError('');
+    try {
+      await importSubscriptions('all');
+      setFormSuccess('已成功同步本机全部官方套餐订阅！');
+      setTimeout(() => setFormSuccess(''), 3000);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // Launch GitHub Copilot Device Code Flow
+  const handleStartCopilot = async () => {
+    setFormError('');
+    setFormSuccess('');
+    try {
+      const res = await startCopilotAuth();
+      setCopilotFlow({
+        userCode: res.userCode,
+        verificationUri: res.verificationUri,
+        deviceCode: res.deviceCode,
+        status: 'waiting',
+      });
+
+      // Try opening browser
+      if (typeof window !== 'undefined' && window.open) {
+        window.open(res.verificationUri, '_blank');
+      }
+
+      // Start background polling
+      const pollTimer = setInterval(async () => {
+        try {
+          const poll = await pollCopilotAuth(res.deviceCode);
+          if (poll.status === 'authorized') {
+            clearInterval(pollTimer);
+            setCopilotFlow((prev) =>
+              prev ? { ...prev, status: 'success' } : null,
+            );
+            setFormSuccess('GitHub Copilot 订阅授权成功！已挂载至 DSH 模型列表。');
+            setTimeout(() => {
+              setCopilotFlow(null);
+              setFormSuccess('');
+            }, 3000);
+          } else if (poll.status === 'expired' || poll.status === 'error') {
+            clearInterval(pollTimer);
+            const finalStatus: 'expired' | 'error' = poll.status === 'expired' ? 'expired' : 'error';
+            setCopilotFlow((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    status: finalStatus,
+                    errorMsg: poll.error || '授权已超时，请重试',
+                  }
+                : null,
+            );
+          }
+        } catch {
+          // ignore transient poll error
+        }
+      }, (res.interval || 5) * 1000);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // Handle Manual Save
+  const handleSaveManualAccount = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
     setFormSuccess('');
 
     if (!accountLabel.trim()) {
-      setFormError('请输入账号标签或备注');
+      setFormError('请输入账号标签或别名');
       return;
     }
-    if (!authSecret.trim()) {
-      setFormError('请输入 API Key 或 Token 凭证');
+    if (!sessionToken.trim()) {
+      setFormError('请输入官方 Session Token / Refresh Token');
       return;
     }
 
@@ -432,14 +579,14 @@ export function HitchfinUnifiedSettingsDashboard() {
       await addAccount({
         channelId: selectedChannel,
         label: accountLabel.trim(),
-        authType: preset?.authType ?? 'api-key',
-        apiKey: authSecret.trim(),
+        authType: 'oauth',
+        accessToken: sessionToken.trim(),
         baseUrl: baseUrlInput.trim() || undefined,
         models: models.length > 0 ? models : undefined,
       });
 
-      setFormSuccess('账号连接成功！已同步至 DSH 模型选择列表。');
-      setAuthSecret('');
+      setFormSuccess('官方套餐账号绑定成功！已同步至 DSH 模型选择列表。');
+      setSessionToken('');
       setTimeout(() => {
         setFormSuccess('');
         setShowAddForm(false);
@@ -450,6 +597,7 @@ export function HitchfinUnifiedSettingsDashboard() {
   };
 
   const activeStrategy = status.defaultStrategy ?? 'smart';
+  const discovered = status.discoveredSubscriptions ?? [];
 
   return (
     <div
@@ -487,8 +635,8 @@ export function HitchfinUnifiedSettingsDashboard() {
               gap: '8px',
             }}
           >
-            <span>Hitchfin 订阅管理与智能路由</span>
-            <Tag tone="success">原生集成</Tag>
+            <span>Hitchfin · 官方套餐订阅与智能路由</span>
+            <Tag tone="success">套餐聚合</Tag>
           </h2>
           <p
             style={{
@@ -498,8 +646,7 @@ export function HitchfinUnifiedSettingsDashboard() {
               lineHeight: 1.5,
             }}
           >
-            自主添加管理各平台订阅账号（DeepSeek、OpenAI、Copilot、Claude、Gemini、Trae
-            等），多账号聚合轮询与出站隐私脱敏保护。
+            原生聚合接入 ChatGPT Plus/Team、GitHub Copilot、字节 Trae、腾讯 WorkBuddy、智谱 GLM Coding Plan 等官方订阅套餐，直接以官方账号登录，无需购买按量 API Key。
           </p>
         </div>
 
@@ -522,7 +669,7 @@ export function HitchfinUnifiedSettingsDashboard() {
               boxShadow: '0 2px 6px rgba(16,185,129,0.3)',
             }}
           >
-            <span>{showAddForm ? '✕ 收起添加表单' : '➕ 添加订阅账号'}</span>
+            <span>{showAddForm ? '✕ 收起登录面板' : '➕ 接入官方订阅账号'}</span>
           </button>
           <button
             type="button"
@@ -542,78 +689,148 @@ export function HitchfinUnifiedSettingsDashboard() {
         </div>
       </div>
 
-      {/* 2. Top Summary Metrics Grid */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-          gap: '12px',
-        }}
-      >
+      {/* 2. Discovered Local Official Subscriptions Notification Banner */}
+      {discovered.length > 0 && (
         <div
           style={{
-            padding: '12px 14px',
-            borderRadius: '8px',
-            border: '1px solid rgba(128,128,128,0.2)',
-            background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.05))',
+            padding: '16px',
+            borderRadius: '10px',
+            border: '1.5px solid #10b981',
+            background: 'var(--dsw-alias-bg-layer-2, rgba(16,185,129,0.06))',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px',
           }}
         >
-          <div style={{ fontSize: '12px', opacity: 0.75 }}>活跃订阅账号</div>
-          <div style={{ fontSize: '22px', fontWeight: 600, marginTop: '2px' }}>
-            {status.accounts.length}
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '10px',
+            }}
+          >
+            <div>
+              <div
+                style={{
+                  fontWeight: 600,
+                  fontSize: '15px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                }}
+              >
+                <span>✨ 发现本机已有 {discovered.length} 个官方套餐登录</span>
+                <Tag tone="success">即插即用</Tag>
+              </div>
+              <div style={{ fontSize: '12px', opacity: 0.8, marginTop: '2px' }}>
+                检测到本机已登录的 ChatGPT、Trae、WorkBuddy、ZCode 等官方账号凭证，可一键直接同步至 DSH 使用。
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void handleImportAllDiscovered()}
+              style={{
+                padding: '7px 18px',
+                borderRadius: '6px',
+                border: 'none',
+                background: '#10b981',
+                color: '#ffffff',
+                fontWeight: 600,
+                fontSize: '13px',
+                cursor: 'pointer',
+                boxShadow: '0 2px 8px rgba(16,185,129,0.3)',
+              }}
+            >
+              {busy ? '正在同步...' : '一键同步全部已登录官方套餐'}
+            </button>
+          </div>
+
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+              gap: '8px',
+            }}
+          >
+            {discovered.map((d) => (
+              <div
+                key={d.id}
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid rgba(128,128,128,0.2)',
+                  background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: '13px' }}>
+                    {d.providerName}
+                  </div>
+                  <div style={{ fontSize: '11px', opacity: 0.75 }}>
+                    账号: {d.user} · 套餐: {d.plan}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void importSubscriptions([d.id])}
+                  style={{
+                    padding: '3px 8px',
+                    borderRadius: '4px',
+                    border: '1px solid #10b981',
+                    background: 'transparent',
+                    color: '#10b981',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  同步
+                </button>
+              </div>
+            ))}
           </div>
         </div>
+      )}
 
+      {/* Global Form Alerts */}
+      {formError && (
         <div
           style={{
-            padding: '12px 14px',
-            borderRadius: '8px',
-            border: '1px solid rgba(128,128,128,0.2)',
-            background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.05))',
+            padding: '10px 14px',
+            borderRadius: '6px',
+            background: 'rgba(239, 68, 68, 0.15)',
+            color: '#ef4444',
+            fontSize: '13px',
           }}
         >
-          <div style={{ fontSize: '12px', opacity: 0.75 }}>出站脱敏保护</div>
-          <div style={{ fontSize: '22px', fontWeight: 600, marginTop: '2px' }}>
-            {status.stats.maskedSecretsCount}{' '}
-            <span style={{ fontSize: '12px', fontWeight: 400 }}>次</span>
-          </div>
+          ⚠️ {formError}
         </div>
-
+      )}
+      {formSuccess && (
         <div
           style={{
-            padding: '12px 14px',
-            borderRadius: '8px',
-            border: '1px solid rgba(128,128,128,0.2)',
-            background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.05))',
+            padding: '10px 14px',
+            borderRadius: '6px',
+            background: 'rgba(16, 185, 129, 0.15)',
+            color: '#10b981',
+            fontSize: '13px',
           }}
         >
-          <div style={{ fontSize: '12px', opacity: 0.75 }}>拦截高危外发</div>
-          <div style={{ fontSize: '22px', fontWeight: 600, marginTop: '2px' }}>
-            {status.stats.blockedExfiltrationsCount}{' '}
-            <span style={{ fontSize: '12px', fontWeight: 400 }}>次</span>
-          </div>
+          ✓ {formSuccess}
         </div>
+      )}
 
-        <div
-          style={{
-            padding: '12px 14px',
-            borderRadius: '8px',
-            border: '1px solid rgba(128,128,128,0.2)',
-            background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.05))',
-          }}
-        >
-          <div style={{ fontSize: '12px', opacity: 0.75 }}>自动容灾切号</div>
-          <div style={{ fontSize: '22px', fontWeight: 600, marginTop: '2px' }}>
-            {status.stats.failoverCount}{' '}
-            <span style={{ fontSize: '12px', fontWeight: 400 }}>次</span>
-          </div>
-        </div>
-      </div>
-
-      {/* 3. Add Account Form (Front & Center) */}
+      {/* 3. Add Official Subscription Account Form */}
       {showAddForm && (
-        <form
-          onSubmit={handleSaveAccount}
+        <div
           style={{
             padding: '18px',
             borderRadius: '10px',
@@ -632,278 +849,491 @@ export function HitchfinUnifiedSettingsDashboard() {
               alignItems: 'center',
             }}
           >
-            <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600 }}>
-              ➕ 自主添加订阅账号
-            </h3>
-            <span style={{ fontSize: '12px', opacity: 0.7 }}>
-              凭证直接保存在本机 DSH 凭据库，零第三方中转
-            </span>
-          </div>
-
-          {formError && (
-            <div
-              style={{
-                padding: '8px 12px',
-                borderRadius: '6px',
-                background: 'rgba(239, 68, 68, 0.15)',
-                color: '#ef4444',
-                fontSize: '13px',
-              }}
-            >
-              ⚠️ {formError}
-            </div>
-          )}
-
-          {formSuccess && (
-            <div
-              style={{
-                padding: '8px 12px',
-                borderRadius: '6px',
-                background: 'rgba(16, 185, 129, 0.15)',
-                color: '#10b981',
-                fontSize: '13px',
-              }}
-            >
-              ✓ {formSuccess}
-            </div>
-          )}
-
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
-              gap: '14px',
-            }}
-          >
-            {/* Channel Provider Select */}
             <div>
-              <label
-                style={{
-                  display: 'block',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  marginBottom: '4px',
-                }}
-              >
-                渠道服务商
-              </label>
-              <select
-                value={selectedChannel}
-                onChange={(e) => handleChannelChange(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '7px 10px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.3)',
-                  background: 'var(--dsw-alias-bg-layer-1, transparent)',
-                  color: 'inherit',
-                  fontSize: '13px',
-                }}
-              >
-                {CHANNEL_PRESETS.map((p) => (
-                  <option key={p.channelId} value={p.channelId}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-              <div style={{ fontSize: '11px', opacity: 0.7, marginTop: '3px' }}>
-                {
-                  CHANNEL_PRESETS.find((p) => p.channelId === selectedChannel)
-                    ?.description
-                }
+              <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 600 }}>
+                ➕ 接入官方套餐订阅账号 (Official Subscription)
+              </h3>
+              <div style={{ fontSize: '12px', opacity: 0.7, marginTop: '2px' }}>
+                支持官方授权登录或绑定已登录的 Session Token，直连官方套餐通道
               </div>
             </div>
 
-            {/* Account Label */}
-            <div>
-              <label
-                style={{
-                  display: 'block',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  marginBottom: '4px',
-                }}
-              >
-                账号标签 / 别名
-              </label>
-              <input
-                type="text"
-                placeholder="例如：我的 DeepSeek 主号、Personal Codex"
-                value={accountLabel}
-                onChange={(e) => setAccountLabel(e.target.value)}
-                style={{
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  padding: '7px 10px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.3)',
-                  background: 'var(--dsw-alias-bg-layer-1, transparent)',
-                  color: 'inherit',
-                  fontSize: '13px',
-                }}
-              />
-            </div>
-          </div>
-
-          {/* Token / Key input */}
-          <div>
+            {/* Mode Toggle Tabs */}
             <div
               style={{
                 display: 'flex',
-                justifyContent: 'space-between',
-                marginBottom: '4px',
+                background: 'rgba(128,128,128,0.15)',
+                borderRadius: '6px',
+                padding: '2px',
               }}
             >
-              <label style={{ fontSize: '12px', fontWeight: 600 }}>
-                认证凭证 (API Key / Token)
-              </label>
               <button
                 type="button"
-                onClick={() => setShowSecret((v) => !v)}
+                onClick={() => setActiveLoginTab('oauth')}
                 style={{
-                  background: 'none',
+                  padding: '4px 12px',
+                  borderRadius: '4px',
                   border: 'none',
-                  fontSize: '11px',
-                  color: '#10b981',
+                  fontSize: '12px',
+                  fontWeight: activeLoginTab === 'oauth' ? 600 : 400,
+                  background:
+                    activeLoginTab === 'oauth' ? '#10b981' : 'transparent',
+                  color: activeLoginTab === 'oauth' ? '#ffffff' : 'inherit',
                   cursor: 'pointer',
-                  padding: 0,
                 }}
               >
-                {showSecret ? '隐藏明文' : '显示明文'}
+                官方授权登录
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveLoginTab('token')}
+                style={{
+                  padding: '4px 12px',
+                  borderRadius: '4px',
+                  border: 'none',
+                  fontSize: '12px',
+                  fontWeight: activeLoginTab === 'token' ? 600 : 400,
+                  background:
+                    activeLoginTab === 'token' ? '#10b981' : 'transparent',
+                  color: activeLoginTab === 'token' ? '#ffffff' : 'inherit',
+                  cursor: 'pointer',
+                }}
+              >
+                绑定 Session Token
               </button>
             </div>
-            <input
-              type={showSecret ? 'text' : 'password'}
-              placeholder={
-                CHANNEL_PRESETS.find((p) => p.channelId === selectedChannel)
-                  ?.placeholder ?? 'sk-...'
-              }
-              value={authSecret}
-              onChange={(e) => setAuthSecret(e.target.value)}
-              style={{
-                width: '100%',
-                boxSizing: 'border-box',
-                padding: '8px 10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(128,128,128,0.3)',
-                background: 'var(--dsw-alias-bg-layer-1, transparent)',
-                color: 'inherit',
-                fontSize: '13px',
-                fontFamily: showSecret ? 'monospace' : 'inherit',
-              }}
-            />
           </div>
 
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
-              gap: '14px',
-            }}
-          >
-            {/* Base URL */}
-            <div>
-              <label
+          {activeLoginTab === 'oauth' ? (
+            /* Mode A: Interactive Official Login Buttons */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div style={{ fontSize: '13px', opacity: 0.85 }}>
+                选择要登录的官方平台，点击后将启动官方授权登录流程：
+              </div>
+
+              {/* Copilot Device Code Widget */}
+              {copilotFlow ? (
+                <div
+                  style={{
+                    padding: '16px',
+                    borderRadius: '8px',
+                    border: '1.5px solid #10b981',
+                    background: 'var(--dsw-alias-bg-layer-1, #1e1e1e)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '10px',
+                    alignItems: 'center',
+                    textAlign: 'center',
+                  }}
+                >
+                  <div style={{ fontWeight: 600, fontSize: '15px' }}>
+                    GitHub Copilot 设备授权
+                  </div>
+                  <div style={{ fontSize: '13px', opacity: 0.85 }}>
+                    请在打开的 GitHub 页面中输入以下 8 位设备码完成授权：
+                  </div>
+                  <div
+                    style={{
+                      fontSize: '28px',
+                      fontWeight: 700,
+                      letterSpacing: '4px',
+                      color: '#10b981',
+                      padding: '8px 20px',
+                      borderRadius: '8px',
+                      background: 'rgba(16,185,129,0.1)',
+                      userSelect: 'all',
+                    }}
+                  >
+                    {copilotFlow.userCode}
+                  </div>
+                  <div style={{ fontSize: '12px', opacity: 0.7 }}>
+                    授权页面:{' '}
+                    <a
+                      href={copilotFlow.verificationUri}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ color: '#10b981' }}
+                    >
+                      {copilotFlow.verificationUri}
+                    </a>
+                  </div>
+                  <div style={{ fontSize: '12px', color: '#10b981' }}>
+                    {copilotFlow.status === 'waiting' &&
+                      '⏳ 正在等待您在网页端确认授权（确认后将自动完成接入）...'}
+                    {copilotFlow.status === 'success' && '✓ 授权成功！'}
+                    {copilotFlow.status === 'expired' && '⚠️ 设备码已过期，请重新点击'}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCopilotFlow(null)}
+                    style={{
+                      marginTop: '6px',
+                      padding: '4px 12px',
+                      borderRadius: '4px',
+                      border: '1px solid rgba(128,128,128,0.3)',
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                    gap: '10px',
+                  }}
+                >
+                  <div
+                    onClick={() => void handleStartCopilot()}
+                    style={{
+                      padding: '12px',
+                      borderRadius: '8px',
+                      border: '1px solid rgba(128,128,128,0.25)',
+                      background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '4px',
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, fontSize: '13px' }}>
+                      🐙 GitHub Copilot 官方授权
+                    </div>
+                    <div style={{ fontSize: '11px', opacity: 0.75 }}>
+                      通过 GitHub 官方设备码授权，连接您的 Copilot 个人/企业订阅
+                    </div>
+                    <div
+                      style={{
+                        marginTop: '6px',
+                        color: '#10b981',
+                        fontSize: '12px',
+                        fontWeight: 600,
+                      }}
+                    >
+                      点击开启设备码授权 →
+                    </div>
+                  </div>
+
+                  <div
+                    onClick={() => {
+                      if (typeof window !== 'undefined' && window.open) {
+                        window.open('https://www.trae.cn/authorization?login_version=1&auth_from=solo&login_channel=native_ide&client_id=ono9krqynydwx5&auth_type=local', '_blank');
+                      }
+                      setActiveLoginTab('token');
+                      setSelectedChannel('trae-cn');
+                      handleChannelChange('trae-cn');
+                    }}
+                    style={{
+                      padding: '12px',
+                      borderRadius: '8px',
+                      border: '1px solid rgba(128,128,128,0.25)',
+                      background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '4px',
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, fontSize: '13px' }}>
+                      ⚡ 字节跳动 Trae 官方授权
+                    </div>
+                    <div style={{ fontSize: '11px', opacity: 0.75 }}>
+                      跳转 Trae 官方授权页登录，获取 Trae 每日签到积分与模型套餐
+                    </div>
+                    <div
+                      style={{
+                        marginTop: '6px',
+                        color: '#10b981',
+                        fontSize: '12px',
+                        fontWeight: 600,
+                      }}
+                    >
+                      打开 Trae 授权页 →
+                    </div>
+                  </div>
+
+                  <div
+                    onClick={() => {
+                      setActiveLoginTab('token');
+                      setSelectedChannel('codex');
+                      handleChannelChange('codex');
+                    }}
+                    style={{
+                      padding: '12px',
+                      borderRadius: '8px',
+                      border: '1px solid rgba(128,128,128,0.25)',
+                      background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '4px',
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, fontSize: '13px' }}>
+                      💬 ChatGPT Plus / Team 订阅绑定
+                    </div>
+                    <div style={{ fontSize: '11px', opacity: 0.75 }}>
+                      直接绑定已登录 ChatGPT 的 Session Token 或 Refresh Token
+                    </div>
+                    <div
+                      style={{
+                        marginTop: '6px',
+                        color: '#10b981',
+                        fontSize: '12px',
+                        fontWeight: 600,
+                      }}
+                    >
+                      前往输入 Token →
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            /* Mode B: Manual Session/Refresh Token Input */
+            <form
+              onSubmit={handleSaveManualAccount}
+              style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}
+            >
+              <div
                 style={{
-                  display: 'block',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  marginBottom: '4px',
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                  gap: '14px',
                 }}
               >
-                接口服务地址 (Base URL)
-              </label>
-              <input
-                type="text"
-                value={baseUrlInput}
-                onChange={(e) => setBaseUrlInput(e.target.value)}
-                style={{
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  padding: '7px 10px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.3)',
-                  background: 'var(--dsw-alias-bg-layer-1, transparent)',
-                  color: 'inherit',
-                  fontSize: '13px',
-                }}
-              />
-            </div>
+                <div>
+                  <label
+                    style={{
+                      display: 'block',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      marginBottom: '4px',
+                    }}
+                  >
+                    官方套餐渠道
+                  </label>
+                  <select
+                    value={selectedChannel}
+                    onChange={(e) => handleChannelChange(e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '7px 10px',
+                      borderRadius: '6px',
+                      border: '1px solid rgba(128,128,128,0.3)',
+                      background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                      color: 'inherit',
+                      fontSize: '13px',
+                    }}
+                  >
+                    {CHANNEL_PRESETS.map((p) => (
+                      <option key={p.channelId} value={p.channelId}>
+                        {p.name} ({p.planName})
+                      </option>
+                    ))}
+                  </select>
+                  <div style={{ fontSize: '11px', opacity: 0.7, marginTop: '3px' }}>
+                    {
+                      CHANNEL_PRESETS.find((p) => p.channelId === selectedChannel)
+                        ?.description
+                    }
+                  </div>
+                </div>
 
-            {/* Model List */}
-            <div>
-              <label
+                <div>
+                  <label
+                    style={{
+                      display: 'block',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      marginBottom: '4px',
+                    }}
+                  >
+                    账号标签 / 别名
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="例如：ChatGPT Plus 个人主号、WorkBuddy 商业版"
+                    value={accountLabel}
+                    onChange={(e) => setAccountLabel(e.target.value)}
+                    style={{
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      padding: '7px 10px',
+                      borderRadius: '6px',
+                      border: '1px solid rgba(128,128,128,0.3)',
+                      background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                      color: 'inherit',
+                      fontSize: '13px',
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    marginBottom: '4px',
+                  }}
+                >
+                  <label style={{ fontSize: '12px', fontWeight: 600 }}>
+                    官方 Session Token / 刷新令牌 (Refresh Token)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowSecret((v) => !v)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      fontSize: '11px',
+                      color: '#10b981',
+                      cursor: 'pointer',
+                      padding: 0,
+                    }}
+                  >
+                    {showSecret ? '隐藏明文' : '显示明文'}
+                  </button>
+                </div>
+                <input
+                  type={showSecret ? 'text' : 'password'}
+                  placeholder={
+                    CHANNEL_PRESETS.find((p) => p.channelId === selectedChannel)
+                      ?.placeholder ?? '粘贴官方 Session Token 或 Refresh Token'
+                  }
+                  value={sessionToken}
+                  onChange={(e) => setSessionToken(e.target.value)}
+                  style={{
+                    width: '100%',
+                    boxSizing: 'border-box',
+                    padding: '8px 10px',
+                    borderRadius: '6px',
+                    border: '1px solid rgba(128,128,128,0.3)',
+                    background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                    color: 'inherit',
+                    fontSize: '13px',
+                    fontFamily: showSecret ? 'monospace' : 'inherit',
+                  }}
+                />
+                <div style={{ fontSize: '11px', opacity: 0.65, marginTop: '3px' }}>
+                  提示：填入对应官方平台登录后颁发的 Session Token、Refresh Token 或 OAuth 令牌即可，凭证保存在本地加密凭据库。
+                </div>
+              </div>
+
+              <div
                 style={{
-                  display: 'block',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  marginBottom: '4px',
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                  gap: '14px',
                 }}
               >
-                可用模型 (逗号分隔)
-              </label>
-              <input
-                type="text"
-                value={modelsInput}
-                onChange={(e) => setModelsInput(e.target.value)}
-                style={{
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  padding: '7px 10px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(128,128,128,0.3)',
-                  background: 'var(--dsw-alias-bg-layer-1, transparent)',
-                  color: 'inherit',
-                  fontSize: '13px',
-                }}
-              />
-            </div>
-          </div>
+                <div>
+                  <label
+                    style={{
+                      display: 'block',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      marginBottom: '4px',
+                    }}
+                  >
+                    官方接口服务地址
+                  </label>
+                  <input
+                    type="text"
+                    value={baseUrlInput}
+                    onChange={(e) => setBaseUrlInput(e.target.value)}
+                    style={{
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      padding: '7px 10px',
+                      borderRadius: '6px',
+                      border: '1px solid rgba(128,128,128,0.3)',
+                      background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                      color: 'inherit',
+                      fontSize: '13px',
+                    }}
+                  />
+                </div>
 
-          {/* Action buttons */}
-          <div
-            style={{
-              display: 'flex',
-              gap: '10px',
-              justifyContent: 'flex-end',
-              marginTop: '4px',
-            }}
-          >
-            <button
-              type="button"
-              onClick={() => setShowAddForm(false)}
-              style={{
-                padding: '6px 14px',
-                borderRadius: '6px',
-                border: '1px solid rgba(128,128,128,0.3)',
-                background: 'transparent',
-                cursor: 'pointer',
-                fontSize: '13px',
-              }}
-            >
-              取消
-            </button>
-            <button
-              type="submit"
-              disabled={busy}
-              style={{
-                padding: '6px 18px',
-                borderRadius: '6px',
-                border: 'none',
-                background: '#10b981',
-                color: '#ffffff',
-                fontWeight: 600,
-                fontSize: '13px',
-                cursor: 'pointer',
-              }}
-            >
-              {busy ? '正在保存...' : '保存并连接账号'}
-            </button>
-          </div>
-        </form>
+                <div>
+                  <label
+                    style={{
+                      display: 'block',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      marginBottom: '4px',
+                    }}
+                  >
+                    挂载可用模型 (逗号分隔)
+                  </label>
+                  <input
+                    type="text"
+                    value={modelsInput}
+                    onChange={(e) => setModelsInput(e.target.value)}
+                    style={{
+                      width: '100%',
+                      boxSizing: 'border-box',
+                      padding: '7px 10px',
+                      borderRadius: '6px',
+                      border: '1px solid rgba(128,128,128,0.3)',
+                      background: 'var(--dsw-alias-bg-layer-1, transparent)',
+                      color: 'inherit',
+                      fontSize: '13px',
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div
+                style={{
+                  display: 'flex',
+                  gap: '10px',
+                  justifyContent: 'flex-end',
+                  marginTop: '4px',
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setShowAddForm(false)}
+                  style={{
+                    padding: '6px 14px',
+                    borderRadius: '6px',
+                    border: '1px solid rgba(128,128,128,0.3)',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  disabled={busy}
+                  style={{
+                    padding: '6px 18px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    background: '#10b981',
+                    color: '#ffffff',
+                    fontWeight: 600,
+                    fontSize: '13px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {busy ? '正在保存...' : '保存并连接官方套餐'}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
       )}
 
-      {/* 4. Connected Accounts Pool Cards */}
+      {/* 4. Connected Subscription Accounts Pool Cards */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         <div
           style={{
@@ -913,10 +1343,10 @@ export function HitchfinUnifiedSettingsDashboard() {
           }}
         >
           <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600 }}>
-            已连接订阅账号池 ({status.accounts.length})
+            已连接官方套餐订阅池 ({status.accounts.length})
           </h3>
           <span style={{ fontSize: '12px', opacity: 0.7 }}>
-            已激活的账号将作为模型服务源挂载到 DSH
+            每个官方账号映射至 DSH 模型选择列表
           </span>
         </div>
 
@@ -931,27 +1361,29 @@ export function HitchfinUnifiedSettingsDashboard() {
             }}
           >
             <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '6px' }}>
-              💡 暂无已连接的订阅账号
+              💡 暂未连接任何官方套餐订阅
             </div>
             <div style={{ fontSize: '13px', opacity: 0.75, marginBottom: '14px' }}>
-              点击上方【➕ 添加订阅账号】按钮，接入您的 DeepSeek、OpenAI、Claude、Copilot 或自定义模型账号。
+              点击上方【一键同步全部已登录官方套餐】或【➕ 接入官方订阅账号】，连接您的 ChatGPT、Copilot、Trae、WorkBuddy 等官方订阅！
             </div>
-            <button
-              type="button"
-              onClick={() => setShowAddForm(true)}
-              style={{
-                padding: '6px 16px',
-                borderRadius: '6px',
-                border: 'none',
-                background: '#10b981',
-                color: '#ffffff',
-                fontWeight: 600,
-                fontSize: '13px',
-                cursor: 'pointer',
-              }}
-            >
-              立即添加第一枚账号
-            </button>
+            {discovered.length > 0 && (
+              <button
+                type="button"
+                onClick={() => void handleImportAllDiscovered()}
+                style={{
+                  padding: '6px 16px',
+                  borderRadius: '6px',
+                  border: 'none',
+                  background: '#10b981',
+                  color: '#ffffff',
+                  fontWeight: 600,
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                }}
+              >
+                立即同步本机发现的 {discovered.length} 个账号
+              </button>
+            )}
           </div>
         ) : (
           <div
@@ -993,12 +1425,12 @@ export function HitchfinUnifiedSettingsDashboard() {
                     >
                       <strong style={{ fontSize: '14px' }}>{acc.label}</strong>
                       <Tag tone={acc.state === 'Healthy' ? 'success' : 'warning'}>
-                        {acc.state === 'Healthy' ? '正常' : acc.state}
+                        {acc.state === 'Healthy' ? '🟢 套餐正常' : acc.state}
                       </Tag>
                     </div>
 
                     <div style={{ fontSize: '12px', opacity: 0.8, marginBottom: '4px' }}>
-                      渠道: {preset?.name ?? acc.channelId} · 标识: {acc.slotId}
+                      服务商: {preset?.name ?? acc.channelId} · 套餐: {preset?.planName ?? '官方订阅'}
                     </div>
 
                     {acc.baseUrl && (
@@ -1098,10 +1530,10 @@ export function HitchfinUnifiedSettingsDashboard() {
       >
         <div>
           <h3 style={{ margin: '0 0 4px 0', fontSize: '15px', fontWeight: 600 }}>
-            智能路由与调度策略
+            多账号智能调度与轮询策略
           </h3>
           <p style={{ margin: 0, fontSize: '12px', opacity: 0.75 }}>
-            当同一个服务商下配置了多个账号时，控制请求如何在各账号之间分发。
+            当同一个服务商下连接了多个官方账号（如多个 ChatGPT 或多个 Trae 账号）时，控制请求如何在各账号之间分发。
           </p>
         </div>
 
@@ -1184,7 +1616,7 @@ export function HitchfinUnifiedSettingsDashboard() {
             出站隐私脱敏与安全外泄防护
           </h3>
           <p style={{ margin: 0, fontSize: '12px', opacity: 0.75 }}>
-            在请求离开 DSH 进程前，实时将敏感 API Key / 私钥替换为 HMAC 占位符，并在流返回时安全还原。
+            在请求离开 DSH 发往外部官方服务商时，自动将代码或会话中的敏感凭证替换为 HMAC 占位符，并在流返回时安全还原。
           </p>
         </div>
 
@@ -1199,7 +1631,7 @@ export function HitchfinUnifiedSettingsDashboard() {
         >
           <div>
             <div style={{ fontWeight: 600, fontSize: '13px' }}>
-              出站敏感信息自动脱敏 (`llm/stream`)
+              出站敏感凭据自动脱敏 (`llm/stream`)
             </div>
             <div style={{ fontSize: '12px', opacity: 0.75 }}>
               发往模型提供商的请求中，自动脱敏密码、Key 和私钥，零内存泄漏
@@ -1271,7 +1703,7 @@ export function HitchfinUnifiedSettingsDashboard() {
         </div>
       </div>
 
-      {/* 7. Collapsible Advanced & Legacy Migration Section (Quietly tucked away) */}
+      {/* 7. Collapsible Advanced & Legacy Migration Section */}
       <div
         style={{
           borderRadius: '8px',
@@ -1360,10 +1792,9 @@ export function HitchfinUnifiedSettingsDashboard() {
               }}
             >
               <div>
-                <div style={{ fontWeight: 600 }}>本地历史 Magpie 凭证</div>
+                <div style={{ fontWeight: 600 }}>重新检测本机官方登录</div>
                 <div style={{ opacity: 0.75 }}>
-                  网关状态:{' '}
-                  {status.magpieBridgeReachable ? '🟢 已检测到本地服务' : '⚪ 未运行'}
+                  重新扫描本机 Codex、Claude、Magpie 登录目录
                 </div>
               </div>
               <button
@@ -1378,7 +1809,7 @@ export function HitchfinUnifiedSettingsDashboard() {
                   cursor: 'pointer',
                 }}
               >
-                探测本地 Magpie
+                重新扫描
               </button>
             </div>
           </div>
@@ -1441,7 +1872,7 @@ export function apply(ctx: ClientPluginContext): void {
     ),
   );
 
-  // 3. Single Unified Settings Page (`settings.section` - One single entry!)
+  // 3. Single Unified Settings Page (`settings.section`)
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {

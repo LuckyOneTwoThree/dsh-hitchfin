@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { HitchfinRuntimeMode, HitchfinStatusSnapshot, RoutingStrategy } from './types.js';
+import type { DiscoveredSubscriptionSummary, HitchfinRuntimeMode, HitchfinStatusSnapshot, RoutingStrategy } from './types.js';
 export interface WebServerRouteRegistration {
     kind: 'exact';
     path: string;
@@ -32,6 +32,20 @@ export interface HitchfinRouteController {
     }): Promise<HitchfinStatusSnapshot>;
     removeAccount(channelId: string, slotId: string): Promise<HitchfinStatusSnapshot>;
     updateRoutingStrategy(strategy: RoutingStrategy): Promise<HitchfinStatusSnapshot>;
+    getDiscoveredSubscriptions(): DiscoveredSubscriptionSummary[];
+    importDiscoveredSubscriptions(accountIds: string[] | 'all'): Promise<HitchfinStatusSnapshot>;
+    startCopilotDeviceFlow(): Promise<{
+        deviceCode: string;
+        userCode: string;
+        verificationUri: string;
+        expiresIn: number;
+        interval: number;
+    }>;
+    pollCopilotDeviceFlow(deviceCode: string): Promise<{
+        status: 'pending' | 'authorized' | 'expired' | 'error';
+        accessToken?: string;
+        error?: string;
+    }>;
 }
 export declare function sendJson(response: ServerResponse, status: number, payload: unknown): void;
 export declare function loopbackAuthority(host: string | undefined): boolean;

@@ -34,12 +34,26 @@ export interface AutonomousAccountConfig {
     models?: string[];
     updatedAt: number;
 }
+export interface DiscoveredSubscriptionSummary {
+    id: string;
+    source: string;
+    channelId: string;
+    providerName: string;
+    user: string;
+    plan: string;
+    hasToken: boolean;
+    baseUrl: string;
+    models: string[];
+    slotId: string;
+    label: string;
+}
 export interface ChannelPreset {
     channelId: string;
     name: string;
+    planName: string;
     defaultBaseUrl: string;
     defaultModels: string[];
-    authType: 'api-key' | 'oauth' | 'bearer';
+    authType: 'oauth' | 'bearer' | 'api-key';
     placeholder: string;
     description: string;
 }
@@ -75,6 +89,7 @@ export interface HitchfinStatusSnapshot {
     magpieEndpoint: string;
     defaultStrategy?: RoutingStrategy;
     presets?: ChannelPreset[];
+    discoveredSubscriptions?: DiscoveredSubscriptionSummary[];
     channels: ChannelSummary[];
     accounts: AccountSlotSummary[];
     routingGroups: RoutingGroupConfig[];

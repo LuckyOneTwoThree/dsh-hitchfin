@@ -10,15 +10,17 @@ import { CooldownTracker } from './router/cooldown.js';
 import { GroupRouter } from './router/group-router.js';
 import { StickySessionCache } from './router/sticky-cache.js';
 import { type HitchfinRouteController } from './rpc/http-routes.js';
-import { type HitchfinRuntimeMode, type HitchfinStatusSnapshot, type RoutingStrategy } from './rpc/types.js';
+import { type DiscoveredSubscriptionSummary, type HitchfinRuntimeMode, type HitchfinStatusSnapshot, type RoutingStrategy } from './rpc/types.js';
 export * from './adapter/hitchfin-adapter.js';
 export * from './adapter/openai-sse-transport.js';
 export * from './adapter/pi-ai-transport.js';
 export * from './channels/flows.js';
+export * from './channels/github-copilot-auth.js';
 export * from './channels/magpie-bridge.js';
 export * from './channels/plugin-worker-host.js';
 export * from './channels/plugin-worker.js';
 export * from './channels/pool.js';
+export * from './channels/subscription-discovery.js';
 export * from './masking/interceptor.js';
 export * from './masking/placeholder.js';
 export * from './masking/policy-guard.js';
@@ -35,17 +37,20 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     magpieEndpoint: z<string, string, "volatile-defined">;
     maskingEnabled: z<boolean, boolean, "volatile-defined">;
     blockHighRiskTools: z<boolean, boolean, "volatile-defined">;
+    autoImportDiscovered: z<boolean, boolean, "volatile-defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     mode: z<"auto" | "bridge" | "standalone", "auto" | "bridge" | "standalone", "volatile-defined">;
     magpieEndpoint: z<string, string, "volatile-defined">;
     maskingEnabled: z<boolean, boolean, "volatile-defined">;
     blockHighRiskTools: z<boolean, boolean, "volatile-defined">;
+    autoImportDiscovered: z<boolean, boolean, "volatile-defined">;
 }>>, "plain">;
 export interface HitchfinPluginConfig {
     mode?: HitchfinRuntimeMode;
     magpieEndpoint?: string;
     maskingEnabled?: boolean;
     blockHighRiskTools?: boolean;
+    autoImportDiscovered?: boolean;
     customFetch?: typeof fetch;
 }
 export declare function unwrapConfig(raw: unknown): HitchfinPluginConfig;
@@ -61,6 +66,7 @@ export declare class HitchfinHostController implements HitchfinRouteController {
     private mode;
     private magpieEndpoint;
     private maskingEnabled;
+    private autoImportDiscovered;
     private magpieReachable;
     private currentStrategy;
     private channels;
@@ -72,6 +78,11 @@ export declare class HitchfinHostController implements HitchfinRouteController {
     private customFetch?;
     constructor(ctx: Context, rawConfig?: HitchfinPluginConfig);
     private resolveDefaultBaseUrlForChannel;
+    getDiscoveredSubscriptionsSummary(): DiscoveredSubscriptionSummary[];
+    getDiscoveredSubscriptions(): DiscoveredSubscriptionSummary[];
+    importDiscoveredSubscriptions(accountIds: string[] | 'all'): Promise<HitchfinStatusSnapshot>;
+    startCopilotDeviceFlow(): Promise<import("./channels/github-copilot-auth.js").DeviceCodeStartResult>;
+    pollCopilotDeviceFlow(deviceCode: string): Promise<import("./channels/github-copilot-auth.js").DeviceCodePollResult>;
     getStatusSnapshot(): HitchfinStatusSnapshot;
     refreshMagpieBridgeStatus(): Promise<boolean>;
     attachLlmRuntime(llm: LlmRuntime): void;

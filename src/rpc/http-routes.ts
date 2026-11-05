@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type {
+  DiscoveredSubscriptionSummary,
   HitchfinRuntimeMode,
   HitchfinStatusSnapshot,
   RoutingStrategy,
@@ -48,6 +49,22 @@ export interface HitchfinRouteController {
   updateRoutingStrategy(
     strategy: RoutingStrategy,
   ): Promise<HitchfinStatusSnapshot>;
+  getDiscoveredSubscriptions(): DiscoveredSubscriptionSummary[];
+  importDiscoveredSubscriptions(
+    accountIds: string[] | 'all',
+  ): Promise<HitchfinStatusSnapshot>;
+  startCopilotDeviceFlow(): Promise<{
+    deviceCode: string;
+    userCode: string;
+    verificationUri: string;
+    expiresIn: number;
+    interval: number;
+  }>;
+  pollCopilotDeviceFlow(deviceCode: string): Promise<{
+    status: 'pending' | 'authorized' | 'expired' | 'error';
+    accessToken?: string;
+    error?: string;
+  }>;
 }
 
 export function sendJson(
@@ -404,6 +421,108 @@ export function mountHitchfinHttpRoutes(
           sendJson(response, 200, snapshot);
         } catch (err) {
           sendJson(response, 400, {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    }),
+
+    webServer.register({
+      kind: 'exact',
+      path: '/api/hitchfin/discovered-subscriptions',
+      handler: (request, response) => {
+        if (request.method !== 'GET') {
+          response.writeHead(405, { allow: 'GET' });
+          response.end();
+          return;
+        }
+        sendJson(response, 200, controller.getDiscoveredSubscriptions());
+      },
+    }),
+
+    webServer.register({
+      kind: 'exact',
+      path: '/api/hitchfin/import-subscriptions',
+      handler: async (request, response) => {
+        if (request.method !== 'POST') {
+          response.writeHead(405, { allow: 'POST' });
+          response.end();
+          return;
+        }
+        if (!sameOrigin(request, getTrustedHosts())) {
+          sendJson(response, 403, { error: 'untrusted origin' });
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          const all = Boolean(body.all);
+          const accountIds = Array.isArray(body.accountIds)
+            ? (body.accountIds.filter((id) => typeof id === 'string') as string[])
+            : [];
+          const snapshot = await controller.importDiscoveredSubscriptions(
+            all ? 'all' : accountIds,
+          );
+          sendJson(response, 200, snapshot);
+        } catch (err) {
+          sendJson(response, 400, {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    }),
+
+    webServer.register({
+      kind: 'exact',
+      path: '/api/hitchfin/auth/copilot/device-code',
+      handler: async (request, response) => {
+        if (request.method !== 'POST') {
+          response.writeHead(405, { allow: 'POST' });
+          response.end();
+          return;
+        }
+        if (!sameOrigin(request, getTrustedHosts())) {
+          sendJson(response, 403, { error: 'untrusted origin' });
+          return;
+        }
+        try {
+          const res = await controller.startCopilotDeviceFlow();
+          sendJson(response, 200, res);
+        } catch (err) {
+          sendJson(response, 500, {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    }),
+
+    webServer.register({
+      kind: 'exact',
+      path: '/api/hitchfin/auth/copilot/poll',
+      handler: async (request, response) => {
+        if (request.method !== 'POST') {
+          response.writeHead(405, { allow: 'POST' });
+          response.end();
+          return;
+        }
+        if (!sameOrigin(request, getTrustedHosts())) {
+          sendJson(response, 403, { error: 'untrusted origin' });
+          return;
+        }
+        try {
+          const body = await readJsonBody(request);
+          if (
+            typeof body.deviceCode !== 'string' ||
+            body.deviceCode.trim() === ''
+          ) {
+            sendJson(response, 400, { error: 'deviceCode is required' });
+            return;
+          }
+          const res = await controller.pollCopilotDeviceFlow(
+            body.deviceCode.trim(),
+          );
+          sendJson(response, 200, res);
+        } catch (err) {
+          sendJson(response, 500, {
             error: err instanceof Error ? err.message : String(err),
           });
         }
