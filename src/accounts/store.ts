@@ -8,6 +8,8 @@ export interface AccountPayload {
   plan?: string
   freeOnly: boolean
   hiddenModels?: string[]
+  /** Optional HTTP(S) proxy for this account's channel requests. */
+  proxy?: string
   createdAt: number
   updatedAt: number
 }
@@ -56,9 +58,25 @@ function parsePayload(record: CredentialRecord | undefined): AccountPayload | un
     ...(Array.isArray(candidate.hiddenModels)
       ? { hiddenModels: candidate.hiddenModels.filter((x): x is string => typeof x === 'string') }
       : {}),
+    ...(typeof candidate.proxy === 'string' && candidate.proxy.trim()
+      ? { proxy: candidate.proxy.trim() }
+      : {}),
     createdAt: typeof candidate.createdAt === 'number' ? candidate.createdAt : Date.now(),
     updatedAt: typeof candidate.updatedAt === 'number' ? candidate.updatedAt : Date.now(),
   }
+}
+
+/** A stable, masked account label derived from the channel's auth payload. */
+export function labelFromAuth(fallback: string, auth: unknown): string {
+  if (!auth || typeof auth !== 'object' || Array.isArray(auth)) return fallback
+  const record = auth as Record<string, unknown>
+  const candidate = [record.accountId, record.uid, record.email, record.name].find(
+    (value) => typeof value === 'string' && value.trim().length > 0,
+  )
+  if (typeof candidate !== 'string') return fallback
+  const value = candidate.trim()
+  const masked = value.length > 8 ? `${value.slice(0, 4)}…${value.slice(-4)}` : value
+  return `${fallback} · ${masked}`
 }
 
 export class AccountStore {
@@ -87,6 +105,39 @@ export class AccountStore {
     if (!this.credentials) return undefined
     const record = await this.credentials.readRecord(accountKey(channelId, accountId))
     return parsePayload(record)
+  }
+
+  async nextAccountId(channelId: string): Promise<string> {
+    const accounts = await this.list(channelId)
+    const used = new Set(accounts.map((account) => account.accountId))
+    for (let i = 1; i < 1000; i += 1) {
+      const id = `acct-${i}`
+      if (!used.has(id)) return id
+    }
+    return `acct-${Date.now()}`
+  }
+
+  async setChannelFreeOnly(channelId: string, freeOnly: boolean): Promise<void> {
+    const accounts = await this.list(channelId)
+    for (const account of accounts) {
+      await this.setFreeOnly(channelId, account.accountId, freeOnly)
+    }
+  }
+
+  async setChannelHiddenModels(channelId: string, hidden: readonly string[]): Promise<void> {
+    const accounts = await this.list(channelId)
+    for (const account of accounts) {
+      await this.setHiddenModels(channelId, account.accountId, hidden)
+    }
+  }
+
+  async setProxy(channelId: string, accountId: string, proxy?: string): Promise<void> {
+    await this.update(channelId, accountId, (current) => {
+      const next = { ...current }
+      if (typeof proxy === 'string' && proxy.trim()) next.proxy = proxy.trim()
+      else delete next.proxy
+      return next
+    })
   }
 
   /** Repair records written before the OpenCode callback shape was normalized. */

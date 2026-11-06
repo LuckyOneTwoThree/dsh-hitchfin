@@ -1,77 +1,181 @@
-# dsh-hitchfin
+<p align="center">
+  <img src="https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/assets/icon.png" width="92" alt="dsh-hitchfin" />
+</p>
 
-DeepSeek Harness (DSH) 官方订阅账号接入插件。
+<h1 align="center">dsh-hitchfin</h1>
 
-## 🎯 定位与核心原则
+<p align="center">
+  <strong>Use your existing WorkBuddy, Qoder and Trae subscriptions inside DeepSeek Harness.</strong>
+</p>
+<p align="center">
+  Multi-account failover · per-account HTTP(S) proxies · free-model filter · model visibility
+</p>
 
-- **聚焦官方订阅套餐**：专为 ChatGPT (Plus / Team / Pro / Codex)、GitHub Copilot、Trae (字节跳动)、WorkBuddy (腾讯混元)、ZCode (智谱 GLM) 等官方订阅账号提供接入、会话与路由池管理。
-- **不做 API Key 接入**：DeepSeek Harness 本身已原生具备完备的通用 API Key 配置能力，本插件专注于官方订阅账号接入与复用。
-- **自主可控**：支持完全手动的官方账号添加、状态监控与展示模型按需选择。
-- **纯净轻量**：独立原生运行，界面简洁直观。
+<p align="center">
+  <a href="README.zh.md">简体中文</a> ·
+  <a href="#installation">Installation</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#privacy-and-scope">Privacy</a> ·
+  <a href="#development">Development</a>
+</p>
 
----
+<p align="center">
+  <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
+  <img src="https://img.shields.io/badge/version-0.3.1-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-17%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
+</p>
 
-## 🚧 开发状态
+![dsh-hitchfin settings](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-light.png)
 
-Phase 0–3 的核心骨架已完成：
+## Why dsh-hitchfin
 
-- Phase 0 报告：[docs/phase-0-spike-report.md](docs/phase-0-spike-report.md)
-- 完整开发计划：[docs/development-plan.md](docs/development-plan.md)
-- Host：DSH `LlmAdapter` + channel worker + 真实 WorkBuddy/Qoder/Trae 渠道包加载。
-- Client：`settings.section` 订阅设置页，支持登录、取消、重新登录、账号删除。
-- 配置能力：仅免费模型、模型可见性勾选、套餐/额度窗口展示。
-- WorkBuddy 实测：Free plan；17 个 live 模型，其中 2 个免费；`hy4-free` 真实请求返回 200 SSE；adapter 端到端拿到 reasoning + 文本 + usage + finish。
-- WorkBuddy 支持浏览器 / 桌面 / API Key 三种登录方式。
-- 渠道包随插件以固定版本 optionalDependencies 安装（WorkBuddy / Qoder / Trae），不再依赖 magpie 安装目录。
-- Qoder CN 浏览器登录与 PAT 输入链路已验证；Trae CN 浏览器登录启动已验证，取消会释放本地回调端口。
-- Trae CN live 目录的 90 个内部 ID 已按显示名去重为 68 个模型；`-Official`、`_advisor_`、`Doubao_1_6` 等别名合并，空名称过滤。
-- Trae CN 不提供免费/付费标记，因此显示全部模型并禁用“仅免费模型”过滤；WorkBuddy/Qoder 仍按免费标记过滤。
-- 设置页首屏快速渲染，额度异步补齐；模型可见性、仅免费模型、套餐/额度均已接入。
-- 已确认 DSH 模型目录包含 `hitchfin-workbuddy-cn`、`hitchfin-qoder-cn`、`hitchfin-trae-cn`。
+DSH already has first-class API-key providers. `dsh-hitchfin` covers the other case: subscription plans you already pay for, accessed through their official account login flows.
+
+It adds WorkBuddy CN, Qoder CN and Trae CN as native DSH model providers. Sign in with an official account, and the models you are entitled to appear in the DSH model picker. No account sharing, no automatic check-in, no attempt to bypass vendor limits.
+
+## Features
+
+- **Official channels** — WorkBuddy CN, Qoder CN and Trae CN, with their official app icons and official login flows.
+- **Multi-account** — keep more than one account per channel. Add, re-authenticate or remove them without touching the others.
+- **Automatic failover** — requests stay on the last working account for a session and model; authentication, quota, rate-limit, server or transport failures move the request to another account before any content is emitted.
+- **Cooldown instead of hammering** — failed accounts cool down for a code-specific window; when every account is cooling down, DSH gets a clear retry time.
+- **Per-account HTTP(S) proxies** — a proxy is applied to that account's sign-in, model list, usage and chat requests. Other accounts stay direct. Proxy credentials are masked in the UI and are never written to logs.
+- **Free-model filter** — free-only is on by default. Channels without free/paid metadata (currently Trae CN) are shown in full instead of hiding everything.
+- **Model visibility** — search the catalog, hide individual models, or hide paid models in one action. Visibility settings apply to the whole channel.
+- **Native DSH UX** — channel tabs, inline quota progress, account menus, account-level proxy editor, model manager, toasts, dark mode and a 390px-wide layout.
+- **One-click browser sign-in** — clicking browser sign-in opens the system browser directly with the official authorization URL. The settings page keeps a re-open link as a fallback, not as a required second click.
+- **Local-first** — credentials live in DSH's credential store on this device. The plugin does not run telemetry or send account data anywhere except the vendor endpoints the channel package is designed to call.
+
+## Screenshots
+
+| Model visibility | Dark mode |
+| --- | --- |
+| ![Model visibility](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/model-visibility.png) | ![Dark mode](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-dark.png) |
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/mobile.png" width="360" alt="Mobile layout" />
+</p>
+
+## Installation
+
+### From the DSH plugin market
+
+Once listed, open **Plugins → Discover**, search for **dsh-hitchfin**, and install it from the card. Restart DSH if the host asks you to.
+
+### From npm (web / CLI profiles)
+
+Once the npm package is published:
 
 ```sh
-npm install
-npm run build
-npm test
+dsh plugin --profile web add dsh-hitchfin
 ```
 
-仍待验证/补齐：Qoder CN / Trae CN 真实登录与请求、多账号/代理/路由，以及安装到主 DSH desktop profile。
-
-## 安装（开发版）
+### From a local build
 
 ```sh
 npm install
 npm run build
 npm pack
+dsh plugin --profile web add ./dsh-hitchfin-0.3.1.tgz
 ```
 
-Web profile 可以直接用 DSH CLI 安装：
+The DSH Desktop profile is managed by the Electron application. Install through the app's **Plugins** page or the plugin market rather than editing the desktop profile by hand.
+
+After installation, open **Settings → 订阅接入**.
+
+### Requirements
+
+- DSH `>= 0.2.2-rc.1`
+- Node.js `>= 20.18.1` (the host runtime in current DSH desktop builds already satisfies this)
+- macOS, Windows or Linux. Browser sign-in uses the platform's default-browser opener (`open`, `rundll32` or `xdg-open`).
+
+## Quick start
+
+1. Open **Settings → 订阅接入** and pick a channel.
+2. Choose a sign-in method. Browser sign-in opens your default browser automatically; use API Key / PAT where the channel offers it.
+3. Keep **Free models only** enabled unless you explicitly want paid models.
+4. The channel's models appear in the DSH model picker. Add a second account or configure an account proxy at any time.
+
+## Channels
+
+| Channel | Status | Sign-in | Free/paid metadata | Verification |
+| --- | --- | --- | --- | --- |
+| WorkBuddy CN | Stable | Browser, desktop app, API Key | Yes | Live model catalog and a real free-model chat request verified |
+| Qoder CN | Stable | Browser, PAT | Yes | Login flow verified; live chat validation is on the roadmap |
+| Trae CN | Experimental | Browser | No — all models are shown | Login flow verified; live catalog deduplicated from 90 internal IDs to 68 display models |
+
+Channel support is powered by maintained OpenCode-compatible adapter packages. Vendor catalogs, quotas and free-tier rules can change at any time.
+
+## Multi-account routing
+
+Routing is deterministic and documented, not a black box:
+
+- The route key is **provider + model + session**. A successful account becomes the preferred account for that key, protecting prompt-cache locality.
+- If the preferred account fails before the first stream chunk, the adapter tries other signed-in accounts.
+- Once any content has been emitted, the request is not switched mid-stream — you never get duplicated text from two accounts.
+- Cooldowns:
+
+| Failure | Cooldown |
+| --- | --- |
+| `AUTH` | 10 minutes |
+| `QUOTA` | 15 minutes |
+| `RATE_LIMIT` | 60 seconds, or `Retry-After` when provided |
+| `SERVER` | 60 seconds |
+| `TRANSPORT` | 30 seconds |
+| `MODEL_NOT_FOUND` | 30 minutes, scoped to that account and model |
+
+When all accounts are cooling down, the request fails with a retry time instead of repeatedly hitting the vendors. Re-authenticating an account, changing its proxy or removing it clears its routing state.
+
+## Privacy and scope
+
+- Credentials are stored through DSH's credential service; the plugin does not write tokens into its own config or expose them to the settings renderer.
+- The settings page only receives models, quota summaries, masked account labels and a masked proxy URL.
+- Requests go to the official vendor endpoints through the channel package. An optional proxy is per account and can be cleared at any time.
+- This is a personal-account bridge. It does not share accounts, farm free tiers, automate check-in, bypass paywalls or evade rate limits.
+- Free tiers are provided by the vendors and may change or disappear at any time. Use your own accounts and follow each vendor's terms.
+
+## Compatibility
+
+| Item | Requirement |
+| --- | --- |
+| DSH | `>= 0.2.2-rc.1` |
+| Node.js | `>= 20.18.1` |
+| Profiles | DSH Web and DSH Desktop |
+| OS | macOS, Windows, Linux |
+| DSH model UI | Model picker, per-model badges, reasoning effort metadata when provided by the channel |
+
+## Development
 
 ```sh
-dsh plugin --profile web add /path/to/dsh-hitchfin-<version>.tgz
+npm install
+npm run typecheck
+npm run build
+npm test
 ```
 
-桌面版需要注意：**desktop profile 由 Electron 应用独占，`dsh plugin --profile desktop` 会被拒绝**。请在 DSH 桌面版的插件页安装本仓库 / 本地 tarball，或由维护者按以下方式安装：
+- `src/adapter/` — DSH `LlmAdapter`, model catalog merge and account routing.
+- `worker/` — channel package host, proxy dispatcher and OpenAI-compatible stream bridge.
+- `src/routes.ts` — local settings API: accounts, login, proxy, visibility.
+- `src/client/` — native DSH settings section.
+- `tests/` — adapter routing/cooldown/failover, account storage, proxy tunnel and SSE mapping tests.
 
-```sh
-cd ~/.dsh/profiles/desktop
-pnpm add /path/to/dsh-hitchfin-<version>.tgz
-# 并把 "dsh-hitchfin" 加入 package.json 的 dsh.profile.bundles
-```
+See [docs/development-plan.md](docs/development-plan.md) for the design notes and verification history. Marketplace submission copy and the release checklist live in [docs/marketplace-listing.md](docs/marketplace-listing.md).
 
-插件会：
+## Roadmap
 
-- 安装 WorkBuddy / Qoder / Trae 三个 optional 渠道包
-- 在设置里增加「订阅接入」页面
-- 不修改 magpie 已有路由，也不改默认模型
+- Qoder CN and Trae CN live chat verification.
+- More granular per-account quota refresh diagnostics.
+- Additional channels only when their official login and terms permit this kind of bridge.
 
-已验证：
+Trae CN is intentionally marked experimental. OpenCode Zen is not part of this plugin.
 
-- 干净 web profile：三个渠道均显示可用，登录前模型目录为空，不会出现开发用 spike provider。
-- macOS DSH Desktop `0.2.2-rc.1` 主 desktop profile：设置页出现「订阅接入」，magpie 的 `llm-pi-ai` 路由和默认模型保持不变。
-- 安装前备份位于 `~/.dsh/backups/dsh-hitchfin-<timestamp>`。
-- 主 profile 不会继承临时测试 profile 的 WorkBuddy 登录，需要重新登录一次。
+## About
 
----
+`dsh-hitchfin` is an independent community plugin for DeepSeek Harness. It is not affiliated with DeepSeek, Tencent, Alibaba, ByteDance or the maintainers of the channel adapter packages. WorkBuddy, Qoder, Trae and their logos are trademarks of their respective owners.
 
-*项目正在重构中，当前为可安装的 Phase 4 开发版。*
+If you find a channel-package or vendor-side issue, please open an issue with the DSH version, channel, sign-in method and a redacted error message. Never paste access tokens, refresh tokens or full credential payloads.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

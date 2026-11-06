@@ -1,25 +1,36 @@
 {
   "name": "dsh-hitchfin",
-  "version": "0.1.1",
-  "description": "Free subscription bridge for DeepSeek Harness: WorkBuddy, Qoder and Trae models inside DSH.",
+  "version": "0.3.1",
+  "description": "Bring WorkBuddy, Qoder and Trae subscription models into DeepSeek Harness with multi-account failover, per-account proxies and model controls. · 将 WorkBuddy、Qoder、Trae 的订阅模型接入 DSH。",
+  "icon": "assets/icon.svg",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "license": "MIT",
+  "author": "LuckyOneTwoThree (https://github.com/LuckyOneTwoThree)",
+  "homepage": "https://github.com/LuckyOneTwoThree/dsh-hitchfin#readme",
+  "bugs": {
+    "url": "https://github.com/LuckyOneTwoThree/dsh-hitchfin/issues"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/LuckyOneTwoThree/dsh-hitchfin.git"
   },
   "keywords": [
     "dsh",
+    "deepseek",
     "deepseek-harness",
     "dsh-plugin",
     "cordis",
     "llm",
+    "model-provider",
     "subscription",
     "workbuddy",
     "qoder",
-    "trae"
+    "trae",
+    "multi-account",
+    "failover",
+    "proxy"
   ],
   "exports": {
     ".": {
@@ -31,12 +42,14 @@
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
   "files": [
+    "assets",
     "lib",
     "worker",
     "client",
     "cordis.patch.yml",
     "locale",
     "README.md",
+    "README.zh.md",
     "LICENSE"
   ],
   "dsh": {
@@ -61,7 +74,8 @@
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "build:client": "node scripts/build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test tests/**/*.test.mjs"
+    "test": "node --test tests/**/*.test.mjs",
+    "prepack": "npm run build"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
@@ -108,5 +122,8 @@
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "undici": "^7.30.2"
   }
 }

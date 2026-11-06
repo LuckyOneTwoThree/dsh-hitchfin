@@ -1,5 +1,5 @@
 import { HitchfinAdapter, SPIKE_PROVIDER } from './adapter/hitchfin-adapter.js'
-import { AccountStore, accountKey } from './accounts/store.js'
+import { AccountStore, accountKey, labelFromAuth } from './accounts/store.js'
 import { errorMessage } from './errors.js'
 import { ChannelRegistry } from './channels/registry.js'
 import { ChannelWorkerHost } from './host/worker-host.js'
@@ -88,39 +88,56 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
             )
           }
 
-          const started = await worker.authorize(loadInfo, accountId, firstMethod.index)
-          if (started.url || started.instructions) {
-            session.notify({
-              message: started.instructions || `Continue signing in to ${descriptor.displayName}`,
-              ...(started.url ? { url: started.url } : {}),
-            })
-          }
+          const existing = await accounts.get(descriptor.id, accountId).catch(() => undefined)
+          const started = await worker.authorize(
+            loadInfo,
+            accountId,
+            firstMethod.index,
+            {},
+            existing?.proxy,
+          )
+          const onAbort = () => worker.cancelAuth(started.session)
+          session.signal.addEventListener('abort', onAbort, { once: true })
 
-          let code: string | undefined
-          if (started.method === 'code') {
-            code = await session.prompt({
-              kind: 'text',
-              message: `Paste the ${descriptor.displayName} authorization code`,
-            })
-          }
+          try {
+            if (started.url || started.instructions) {
+              session.notify({
+                message: started.instructions || `Continue signing in to ${descriptor.displayName}`,
+                ...(started.url ? { url: started.url } : {}),
+              })
+            }
 
-          const result = await worker.callback(loadInfo, started.session, code)
-          const now = Date.now()
-          await session.commit({
-            kind: 'grant',
-            payload: {
-              channelId: descriptor.id,
-              accountId,
-              label: descriptor.displayName,
-              auth: result.auth,
-              freeOnly: descriptor.freeOnlyDefault,
-              createdAt: now,
-              updatedAt: now,
-            },
-          })
-          adapter.invalidate(descriptor.providerId)
-          ctx.emit?.('llm/models-updated', descriptor.providerId)
-          ctx.logger.info(`dsh-hitchfin: signed in to ${descriptor.displayName}`)
+            let code: string | undefined
+            if (started.method === 'code') {
+              code = await session.prompt({
+                kind: 'text',
+                message: `Paste the ${descriptor.displayName} authorization code`,
+              })
+            }
+
+            const result = await worker.callback(loadInfo, started.session, code, existing?.proxy)
+            const now = Date.now()
+            await session.commit({
+              kind: 'grant',
+              payload: {
+                channelId: descriptor.id,
+                accountId,
+                label: existing?.label ?? labelFromAuth(descriptor.displayName, result.auth),
+                auth: result.auth,
+                freeOnly: existing !== undefined ? existing.freeOnly : descriptor.freeOnlyDefault,
+                hiddenModels: existing?.hiddenModels,
+                ...(existing?.proxy ? { proxy: existing.proxy } : {}),
+                createdAt: existing?.createdAt ?? now,
+                updatedAt: now,
+              },
+            })
+            adapter.forget(descriptor.providerId, accountId)
+            adapter.invalidate(descriptor.providerId)
+            ctx.emit?.('llm/models-updated', descriptor.providerId)
+            ctx.logger.info(`dsh-hitchfin: signed in to ${descriptor.displayName}`)
+          } finally {
+            session.signal.removeEventListener('abort', onAbort)
+          }
         },
       })
     }

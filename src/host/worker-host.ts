@@ -16,6 +16,7 @@ export interface ChannelCallOptions {
   auth?: unknown
   freeOnly?: boolean
   model?: string
+  proxy?: string
 }
 
 export interface ChannelModelRecord {
@@ -247,13 +248,21 @@ export class ChannelWorkerHost {
     return this.call('describe', { channel })
   }
 
-  async models(options: ChannelCallOptions): Promise<readonly ChannelModelRecord[]> {
-    const result = await this.call<{ models?: ChannelModelRecord[] }>('models', {
-      channel: options.channel,
-      accountId: options.accountId ?? '',
-      auth: options.auth,
-      freeOnly: options.freeOnly ?? false,
-    })
+  async models(
+    options: ChannelCallOptions,
+    timeoutMs = this.defaultTimeoutMs,
+  ): Promise<readonly ChannelModelRecord[]> {
+    const result = await this.call<{ models?: ChannelModelRecord[] }>(
+      'models',
+      {
+        channel: options.channel,
+        accountId: options.accountId ?? '',
+        auth: options.auth,
+        freeOnly: options.freeOnly ?? false,
+        ...(options.proxy ? { proxy: options.proxy } : {}),
+      },
+      timeoutMs,
+    )
     return result.models ?? []
   }
 
@@ -264,6 +273,7 @@ export class ChannelWorkerHost {
         channel: options.channel,
         accountId: options.accountId ?? '',
         auth: options.auth,
+        ...(options.proxy ? { proxy: options.proxy } : {}),
       },
       timeoutMs,
     )
@@ -275,10 +285,11 @@ export class ChannelWorkerHost {
     accountId: string,
     method: number,
     inputs: Record<string, string> = {},
+    proxy?: string,
   ): Promise<ChannelAuthStart> {
     return this.call(
       'authorize',
-      { channel, accountId, method, inputs },
+      { channel, accountId, method, inputs, ...(proxy ? { proxy } : {}) },
       60_000,
     )
   }
@@ -301,10 +312,11 @@ export class ChannelWorkerHost {
     channel: ChannelLoadInfo,
     session: string,
     code?: string,
+    proxy?: string,
   ): Promise<ChannelAuthResult> {
     return this.call(
       'callback',
-      { channel, session, code: code ?? '' },
+      { channel, session, code: code ?? '', ...(proxy ? { proxy } : {}) },
       15 * 60_000,
     )
   }
@@ -313,9 +325,18 @@ export class ChannelWorkerHost {
     this.send({ type: 'cancelAuth', session })
     // Trae's browser sign-in opens a loopback callback server. Aborting its
     // signal is not enough to release that server, so recycle the worker once
-    // the cancel message has been delivered.
+    // the cancel message has been delivered and no streams are actively using it.
     setTimeout(() => {
-      void this.restart()
+      if (this.streams.size === 0) {
+        void this.restart()
+      } else {
+        const check = setInterval(() => {
+          if (this.streams.size === 0) {
+            clearInterval(check)
+            void this.restart()
+          }
+        }, 1000)
+      }
     }, 500)
   }
 
@@ -377,6 +398,7 @@ export class ChannelWorkerHost {
         auth: options.auth,
         model: options.model ?? '',
         sessionId: options.sessionId ?? '',
+        ...(options.proxy ? { proxy: options.proxy } : {}),
         request: {
           url: input,
           method: init.method ?? 'POST',

@@ -1,12 +1,13 @@
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { errorMessage } from './errors.js'
 import { dedupeModels } from './models.js'
-import type { AccountPayload, AccountStore } from './accounts/store.js'
+import { labelFromAuth, type AccountPayload, type AccountStore } from './accounts/store.js'
 import type { ChannelDescriptor } from './channels/descriptor.js'
 import type { ChannelRegistry } from './channels/registry.js'
 import type { HitchfinAdapter } from './adapter/hitchfin-adapter.js'
-import type { ChannelWorkerHost } from './host/worker-host.js'
+import type { ChannelModelRecord, ChannelWorkerHost } from './host/worker-host.js'
 import type { HitchfinContext, WebRoute } from './types.js'
 
 const PREFIX = '/dsh-hitchfin'
@@ -24,6 +25,8 @@ interface LoginState {
   url?: string
   instructions?: string
   opened?: boolean
+  autoOpened?: boolean
+  proxy?: string
   error?: string
   account?: AccountPayload
   createdAt: number
@@ -71,19 +74,26 @@ function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerRes
   }
 
   const origin = req.headers.origin
-  if (origin) {
-    try {
-      const host = new URL(origin).hostname
-      if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
-        sendJson(res, 403, { ok: false, error: 'origin refused' })
-        return true
-      }
-    } catch {
-      sendJson(res, 403, { ok: false, error: 'origin refused' })
-      return true
-    }
+  if (origin === undefined || origin === 'null' || origin === '') {
+    return false
   }
-  return false
+
+  try {
+    const originUrl = new URL(origin)
+    if (
+      originUrl.hostname === '127.0.0.1' ||
+      originUrl.hostname === 'localhost' ||
+      originUrl.hostname === '::1' ||
+      ['dsh:', 'app:', 'vscode-file:', 'vscode-webview:', 'file:'].includes(originUrl.protocol)
+    ) {
+      return false
+    }
+    sendJson(res, 403, { ok: false, error: 'origin refused' })
+    return true
+  } catch {
+    // If origin is not a standard URL (e.g. Electron internal identifier), but connection is loopback
+    return false
+  }
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -120,23 +130,100 @@ function publicLogin(state: LoginState): Record<string, unknown> {
   return {
     id: state.id,
     channelId: state.channelId,
+    accountId: state.accountId,
     status: state.status,
     method: state.method,
     ...(state.url ? { url: state.url } : {}),
     ...(state.instructions ? { instructions: state.instructions } : {}),
     ...(state.opened ? { opened: true } : {}),
+    ...(state.autoOpened ? { autoOpened: true } : {}),
     ...(state.error ? { error: state.error } : {}),
     ...(state.account ? { account: publicAccount(state.account) } : {}),
   }
 }
 
-function publicAccount(account: AccountPayload): Record<string, unknown> {
+function publicProxy(proxy?: string): Record<string, unknown> {
+  if (!proxy) return { proxyConfigured: false }
+  try {
+    const url = new URL(proxy)
+    if (url.username || url.password) {
+      url.username = url.username ? '***' : ''
+      url.password = ''
+    }
+    return { proxy: url.toString(), proxyConfigured: true }
+  } catch {
+    return { proxyConfigured: true }
+  }
+}
+
+function publicAccount(
+  account: AccountPayload,
+  modelCount?: number,
+  quota?: Record<string, unknown> | null,
+  error?: string,
+): Record<string, unknown> {
   return {
     accountId: account.accountId,
     label: account.label,
     freeOnly: account.freeOnly,
     hiddenModels: account.hiddenModels ?? [],
+    ...(modelCount !== undefined ? { modelCount } : {}),
+    ...(quota !== undefined ? { quota } : {}),
+    ...(error ? { error } : {}),
+    ...publicProxy(account.proxy),
   }
+}
+
+function openExternal(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+    const [command, args] =
+      process.platform === 'darwin'
+        ? ['open', [url]]
+        : process.platform === 'win32'
+          ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
+          : ['xdg-open', [url]]
+    const child = spawn(command, args, { detached: true, stdio: 'ignore' })
+    child.on('error', () => {})
+    child.unref()
+    return true
+  } catch {
+    return false
+  }
+}
+
+function parseProxy(value: unknown): { proxy?: string; error?: string } {
+  if (typeof value !== 'string' || !value.trim()) return {}
+  try {
+    const url = new URL(value.trim())
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return { error: 'proxy must start with http:// or https://' }
+    }
+    return { proxy: url.toString() }
+  } catch {
+    return { error: 'invalid proxy URL' }
+  }
+}
+
+function identityOf(auth: unknown): string {
+  if (!auth || typeof auth !== 'object' || Array.isArray(auth)) return ''
+  const record = auth as Record<string, unknown>
+  for (const key of ['accountId', 'uid', 'email']) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) return `${key}:${value.trim()}`
+  }
+  return ''
+}
+
+async function resolveAccountId(
+  accountStore: AccountStore,
+  channelId: string,
+  requested: unknown,
+): Promise<string> {
+  const wanted = typeof requested === 'string' ? requested.trim() : ''
+  if (wanted && wanted !== 'new') return wanted
+  return accountStore.nextAccountId(channelId)
 }
 
 export function registerHitchfinRoutes(
@@ -155,6 +242,35 @@ export function registerHitchfinRoutes(
   const modelsChanged = (descriptor: ChannelDescriptor): void => {
     adapter.invalidate(descriptor.providerId)
     ctx.emit?.('llm/models-updated', descriptor.providerId)
+  }
+
+  async function saveLoginAccount(
+    descriptor: ChannelDescriptor,
+    accountId: string,
+    auth: unknown,
+  ): Promise<AccountPayload> {
+    let existing = await accounts.get(descriptor.id, accountId).catch(() => undefined)
+    if (!existing) {
+      const identity = identityOf(auth)
+      if (identity) {
+        const stored = await accounts.list(descriptor.id).catch(() => [])
+        existing = stored.find((entry) => identityOf(entry.auth) === identity)
+      }
+    }
+
+    const now = Date.now()
+    return accounts.save({
+      channelId: descriptor.id,
+      accountId: existing?.accountId ?? accountId,
+      label: existing?.label ?? labelFromAuth(descriptor.displayName, auth),
+      auth,
+      freeOnly: existing?.freeOnly ?? descriptor.freeOnlyDefault,
+      ...(existing?.plan ? { plan: existing.plan } : {}),
+      ...(existing?.hiddenModels ? { hiddenModels: existing.hiddenModels } : {}),
+      ...(existing?.proxy ? { proxy: existing.proxy } : {}),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    })
   }
 
   void Promise.resolve(
@@ -180,103 +296,145 @@ export function registerHitchfinRoutes(
 
     if (path === '/state' && !methodRefused(req, res, ['GET', 'HEAD'])) {
       const withQuota = url.searchParams.get('quota') !== '0'
-      const channels = []
-      for (const descriptor of registry.all()) {
-        let accountList: readonly AccountPayload[] = []
-        try {
-          accountList = await accounts.list(descriptor.id)
-        } catch {
-          // Keep the channel visible even if the credential store is unreadable.
-        }
-        const loadInfo = registry.loadInfo(descriptor)
-        const packageAvailable = loadInfo !== undefined
-        let models: Array<Record<string, unknown>> = []
-        let allModels: Array<Record<string, unknown>> = []
-        let quota: Record<string, unknown> | null = null
-        const account = accountList[0]
-        if (packageAvailable) {
-          if (account && loadInfo) {
-            try {
-              const records = await worker.models({
-                channel: loadInfo,
-                accountId: account.accountId,
-                auth: account.auth,
-                freeOnly: false,
-              })
-              const hidden = new Set(account.hiddenModels ?? [])
-              const unique = dedupeModels(records)
-              allModels = unique.map((model) => ({
-                id: model.id,
-                name: model.name,
-                free: model.free,
-                freeKnown: model.freeKnown,
-              }))
-              models = (await adapter.listModels(descriptor.providerId)).map((model) => ({
-                id: model.id,
-                name: model.name,
-                free: model.badge?.tone === 'success',
-              }))
-              if (models.length === 0) {
-                // A cache from before a free-only change may still be warming;
-                // show what the worker sees rather than an empty configuration.
-                const hasFreeMetadata = records.some((model) => model.freeKnown)
-                const usable =
-                  account.freeOnly !== false && hasFreeMetadata
-                    ? records.filter((model) => model.freeKnown && model.free)
-                    : records
-                models = dedupeModels(usable)
-                  .filter((model) => !hidden.has(model.id))
-                  .map((model) => ({ id: model.id, name: model.name, free: model.free }))
-              }
-            } catch {
-              // Keep the channel visible; the user can re-login or refresh.
-            }
-            if (withQuota) {
-              try {
-                quota = (await worker.usage(
-                  {
+      const channels = await Promise.all(
+        registry.all().map(async (descriptor) => {
+          let accountList: readonly AccountPayload[] = []
+          try {
+            accountList = await accounts.list(descriptor.id)
+          } catch {
+            // Keep the channel visible even if the credential store is unreadable.
+          }
+          const loadInfo = registry.loadInfo(descriptor)
+          const packageAvailable = loadInfo !== undefined
+
+          const views = await Promise.all(
+            accountList.map(async (account) => {
+              let raw: readonly ChannelModelRecord[] = []
+              let quota: Record<string, unknown> | null = null
+              let error: string | undefined
+              if (loadInfo) {
+                try {
+                  raw = await worker.models({
                     channel: loadInfo,
                     accountId: account.accountId,
                     auth: account.auth,
-                  },
-                  5_000,
-                )) as unknown as Record<string, unknown>
-              } catch {
-                quota = null
+                    freeOnly: false,
+                    ...(account.proxy ? { proxy: account.proxy } : {}),
+                  }, 8_000)
+                } catch (cause) {
+                  error = errorMessage(cause)
+                }
+                if (withQuota) {
+                  try {
+                    quota = (await worker.usage(
+                      {
+                        channel: loadInfo,
+                        accountId: account.accountId,
+                        auth: account.auth,
+                        ...(account.proxy ? { proxy: account.proxy } : {}),
+                      },
+                      5_000,
+                    )) as unknown as Record<string, unknown>
+                  } catch {
+                    quota = null
+                  }
+                }
+              }
+
+              const hidden = new Set(account.hiddenModels ?? [])
+              const hasFreeMetadata = raw.some((model) => model.freeKnown)
+              const usable =
+                account.freeOnly !== false && hasFreeMetadata
+                  ? raw.filter((model) => model.freeKnown && model.free)
+                  : raw
+              const visible = dedupeModels(usable).filter((model) => !hidden.has(model.id))
+              return { account, raw, visible, quota, error }
+            }),
+          )
+
+          const mergedVisible = new Map<string, ChannelModelRecord>()
+          const mergedAll = new Map<string, ChannelModelRecord>()
+          for (const view of views) {
+            for (const model of view.visible) {
+              const existing = mergedVisible.get(model.id)
+              if (!existing || (model.freeKnown && model.free && !existing.free)) {
+                mergedVisible.set(model.id, model)
               }
             }
-          } else {
+            for (const model of view.raw) {
+              const existing = mergedAll.get(model.id)
+              mergedAll.set(model.id, {
+                ...(existing ?? model),
+                free: (existing?.free ?? false) || model.free,
+                freeKnown: (existing?.freeKnown ?? false) || model.freeKnown,
+              })
+            }
+          }
+
+          let models = dedupeModels([...mergedVisible.values()]).map((model) => ({
+            id: model.id,
+            name: model.name,
+            free: model.free,
+          }))
+          let allModels = dedupeModels([...mergedAll.values()]).map((model) => ({
+            id: model.id,
+            name: model.name,
+            free: model.free,
+            freeKnown: model.freeKnown,
+          }))
+          let freeStatusKnown = allModels.some((model) => model.freeKnown)
+
+          if (views.length === 0) {
             try {
               models = (await adapter.listModels(descriptor.providerId)).map((model) => ({
                 id: model.id,
                 name: model.name,
                 free: model.badge?.tone === 'success',
               }))
-              allModels = models
+              allModels = models.map((model) => ({ ...model, freeKnown: false }))
+              freeStatusKnown = false
             } catch {
               // A channel whose package is missing lists no models.
             }
           }
-        }
-        channels.push({
-          id: descriptor.id,
-          providerId: descriptor.providerId,
-          displayName: descriptor.displayName,
-          status: descriptor.status,
-          packageAvailable,
-          freeStatusKnown: allModels.some((model) => model.freeKnown === true),
-          freeOnly:
-            accountList.length > 0
-              ? accountList.every((entry) => entry.freeOnly !== false)
-              : true,
-          methods: descriptor.authMethods,
-          accounts: accountList.map(publicAccount),
-          models,
-          allModels,
-          quota,
-          modelCount: models.length,
-        })
-      }
+
+          let hiddenModels: string[] = []
+          if (accountList.length > 0) {
+            hiddenModels = [...(accountList[0].hiddenModels ?? [])]
+            for (const account of accountList.slice(1)) {
+              const hidden = new Set(account.hiddenModels ?? [])
+              hiddenModels = hiddenModels.filter((id) => hidden.has(id))
+            }
+          }
+
+          return {
+            id: descriptor.id,
+            providerId: descriptor.providerId,
+            displayName: descriptor.displayName,
+            status: descriptor.status,
+            packageAvailable,
+            freeStatusKnown,
+            freeOnly:
+              accountList.length > 0
+                ? accountList.every((entry) => entry.freeOnly !== false)
+                : true,
+            hiddenModels,
+            methods: descriptor.authMethods,
+            accounts: views.map((view) =>
+              publicAccount(
+                view.account,
+                view.visible.length,
+                withQuota ? view.quota : undefined,
+                view.error,
+              ),
+            ),
+            models,
+            allModels,
+            quota: views[0]?.quota ?? null,
+            modelCount: models.length,
+          }
+        }),
+      )
       sendJson(res, 200, { ok: true, channels })
       return
     }
@@ -304,18 +462,34 @@ export function registerHitchfinRoutes(
           if (typeof value === 'string') inputs[key] = value.slice(0, 4096)
         }
       }
+      const parsedProxy = parseProxy(body.proxy)
+      if (parsedProxy.error) {
+        sendJson(res, 400, { ok: false, error: parsedProxy.error })
+        return
+      }
+      const accountId = await resolveAccountId(accounts, descriptor.id, body.accountId)
+      const existing = await accounts.get(descriptor.id, accountId).catch(() => undefined)
+      const proxy = parsedProxy.proxy ?? existing?.proxy
+      const authMethod = descriptor.authMethods.find((entry) => entry.index === methodIndex)
       try {
-        const started = await worker.authorize(loadInfo, 'acct-1', methodIndex, inputs)
+        const started = await worker.authorize(loadInfo, accountId, methodIndex, inputs, proxy)
+        const autoOpened = Boolean(
+          started.url &&
+            authMethod?.id === 'browser' &&
+            (started.opened === true || openExternal(started.url)),
+        )
         const state: LoginState = {
           id: randomUUID(),
           channelId: descriptor.id,
-          accountId: 'acct-1',
+          accountId,
           workerSession: started.session,
           method: started.method === 'code' ? 'code' : 'auto',
           status: started.method === 'code' ? 'code' : 'pending',
           ...(started.url ? { url: started.url } : {}),
           ...(started.instructions ? { instructions: started.instructions } : {}),
           ...(started.opened ? { opened: true } : {}),
+          ...(autoOpened ? { autoOpened: true } : {}),
+          ...(proxy ? { proxy } : {}),
           createdAt: Date.now(),
         }
         logins.set(state.id, state)
@@ -359,18 +533,10 @@ export function registerHitchfinRoutes(
         return
       }
       try {
-        const result = await worker.apiKey(loadInfo, 'acct-1', methodIndex, key)
-        const now = Date.now()
-        const account: AccountPayload = {
-          channelId: descriptor.id,
-          accountId: 'acct-1',
-          label: descriptor.displayName,
-          auth: result.auth,
-          freeOnly: descriptor.freeOnlyDefault,
-          createdAt: now,
-          updatedAt: now,
-        }
-        await accounts.save(account)
+        const accountId = await resolveAccountId(accounts, descriptor.id, body.accountId)
+        const result = await worker.apiKey(loadInfo, accountId, methodIndex, key)
+        const account = await saveLoginAccount(descriptor, accountId, result.auth)
+        adapter.forget(descriptor.providerId, account.accountId)
         modelsChanged(descriptor)
         sendJson(res, 200, { ok: true, account: publicAccount(account) })
       } catch (error) {
@@ -433,9 +599,44 @@ export function registerHitchfinRoutes(
         sendJson(res, 404, { ok: false, error: 'unknown channel' })
         return
       }
-      await accounts.setFreeOnly(descriptor.id, text(body.accountId) || 'acct-1', body.freeOnly !== false)
+      const accountId = text(body.accountId)
+      if (accountId) {
+        await accounts.setFreeOnly(descriptor.id, accountId, body.freeOnly !== false)
+      } else {
+        await accounts.setChannelFreeOnly(descriptor.id, body.freeOnly !== false)
+      }
       modelsChanged(descriptor)
       sendJson(res, 200, { ok: true })
+      return
+    }
+
+    if (path === '/account/proxy' && !methodRefused(req, res, ['POST'])) {
+      const body = await readJson(req)
+      const descriptor = descriptorOf(registry, text(body.channelId))
+      if (!descriptor) {
+        sendJson(res, 404, { ok: false, error: 'unknown channel' })
+        return
+      }
+      const accountId = text(body.accountId)
+      if (!accountId) {
+        sendJson(res, 400, { ok: false, error: 'accountId is required' })
+        return
+      }
+      const account = await accounts.get(descriptor.id, accountId)
+      if (!account) {
+        sendJson(res, 404, { ok: false, error: 'unknown account' })
+        return
+      }
+      const parsedProxy = parseProxy(body.proxy)
+      if (parsedProxy.error) {
+        sendJson(res, 400, { ok: false, error: parsedProxy.error })
+        return
+      }
+      await accounts.setProxy(descriptor.id, accountId, parsedProxy.proxy)
+      adapter.forget(descriptor.providerId, accountId)
+      modelsChanged(descriptor)
+      const updated = (await accounts.get(descriptor.id, accountId)) ?? account
+      sendJson(res, 200, { ok: true, account: publicAccount(updated) })
       return
     }
 
@@ -446,7 +647,13 @@ export function registerHitchfinRoutes(
         sendJson(res, 404, { ok: false, error: 'unknown channel' })
         return
       }
-      await accounts.delete(descriptor.id, text(body.accountId) || 'acct-1')
+      const accountId = text(body.accountId)
+      if (!accountId) {
+        sendJson(res, 400, { ok: false, error: 'accountId is required' })
+        return
+      }
+      await accounts.delete(descriptor.id, accountId)
+      adapter.forget(descriptor.providerId, accountId)
       modelsChanged(descriptor)
       sendJson(res, 200, { ok: true })
       return
@@ -460,9 +667,21 @@ export function registerHitchfinRoutes(
         return
       }
       const hidden = Array.isArray(body.hiddenModels)
-        ? body.hiddenModels.filter((value): value is string => typeof value === 'string')
+        ? [
+            ...new Set(
+              body.hiddenModels
+                .filter((value): value is string => typeof value === 'string')
+                .map((value) => value.trim())
+                .filter(Boolean),
+            ),
+          ]
         : []
-      await accounts.setHiddenModels(descriptor.id, text(body.accountId) || 'acct-1', hidden)
+      const accountId = text(body.accountId)
+      if (accountId) {
+        await accounts.setHiddenModels(descriptor.id, accountId, hidden)
+      } else {
+        await accounts.setChannelHiddenModels(descriptor.id, hidden)
+      }
       modelsChanged(descriptor)
       sendJson(res, 200, { ok: true })
       return
@@ -478,19 +697,11 @@ export function registerHitchfinRoutes(
     code?: string,
   ): Promise<void> {
     try {
-      const result = await worker.callback(loadInfo, state.workerSession, code)
-      const now = Date.now()
-      const account: AccountPayload = {
-        channelId: descriptor.id,
-        accountId: state.accountId,
-        label: descriptor.displayName,
-        auth: result.auth,
-        freeOnly: descriptor.freeOnlyDefault,
-        createdAt: now,
-        updatedAt: now,
-      }
-      await accounts.save(account)
+      const result = await worker.callback(loadInfo, state.workerSession, code, state.proxy)
+      const account = await saveLoginAccount(descriptor, state.accountId, result.auth)
+      adapter.forget(descriptor.providerId, account.accountId)
       modelsChanged(descriptor)
+      state.accountId = account.accountId
       state.status = 'ok'
       state.account = account
     } catch (error) {

@@ -34,6 +34,37 @@ interface ModelCacheEntry {
   models: readonly LlmResolvedModelInfo[]
 }
 
+interface CooldownState {
+  until: number
+  code: string
+  message: string
+  retryAfterMs?: number
+}
+
+const COOLDOWN_MS: Readonly<Record<string, number>> = {
+  AUTH: 10 * 60_000,
+  QUOTA: 15 * 60_000,
+  RATE_LIMIT: 60_000,
+  SERVER: 60_000,
+  TRANSPORT: 30_000,
+  TIMEOUT: 60_000,
+  MODEL_NOT_FOUND: 30 * 60_000,
+}
+
+const MODEL_SCOPED_COOLDOWN = new Set(['MODEL_NOT_FOUND'])
+
+function accountRouteKey(provider: string, accountId: string): string {
+  return `${provider}\0${accountId}`
+}
+
+function modelRouteKey(provider: string, accountId: string, model: string): string {
+  return `${provider}\0${accountId}\0${model}`
+}
+
+function conversationKey(provider: string, model: string, sessionId?: string): string {
+  return `${provider}\0${model}\0${sessionId ?? ''}`
+}
+
 export interface HitchfinAdapterOptions {
   registry: ChannelRegistry
   accounts: AccountStore
@@ -97,6 +128,8 @@ function failureOf(error: unknown, signal?: AbortSignal): LlmFailure {
  */
 export class HitchfinAdapter implements HitchfinLlmAdapter {
   private readonly cache = new Map<string, ModelCacheEntry>()
+  private readonly cooldowns = new Map<string, CooldownState>()
+  private readonly sticky = new Map<string, string>()
 
   constructor(private readonly options: HitchfinAdapterOptions) {}
 
@@ -105,6 +138,21 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       this.cache.delete(provider)
     } else {
       this.cache.clear()
+    }
+  }
+
+  /** Drop routing state after an account is re-authenticated or removed. */
+  forget(provider: string, accountId: string): void {
+    const accountPrefix = `${provider}\0${accountId}`
+    for (const key of this.cooldowns.keys()) {
+      if (key === accountPrefix || key.startsWith(`${accountPrefix}\0`)) {
+        this.cooldowns.delete(key)
+      }
+    }
+    for (const [key, value] of this.sticky) {
+      if (value === accountId && key.startsWith(`${provider}\0`)) {
+        this.sticky.delete(key)
+      }
     }
   }
 
@@ -119,6 +167,87 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
 
   providerRetryPolicy(): undefined {
     return undefined
+  }
+
+  private cooldownFor(
+    provider: string,
+    accountId: string,
+    model: string,
+    now: number,
+  ): CooldownState | undefined {
+    const accountState = this.cooldowns.get(accountRouteKey(provider, accountId))
+    if (accountState && accountState.until > now) return accountState
+    const modelState = this.cooldowns.get(modelRouteKey(provider, accountId, model))
+    if (modelState && modelState.until > now) return modelState
+    return undefined
+  }
+
+  private noteFailure(
+    provider: string,
+    accountId: string,
+    model: string,
+    failure: LlmFailure,
+  ): void {
+    const base = COOLDOWN_MS[failure.code]
+    if (base === undefined) return
+    const now = Date.now()
+    const duration = Math.max(base, failure.providerRetryAfterMs ?? 0)
+    const key = MODEL_SCOPED_COOLDOWN.has(failure.code)
+      ? modelRouteKey(provider, accountId, model)
+      : accountRouteKey(provider, accountId)
+    this.cooldowns.set(key, {
+      until: now + duration,
+      code: failure.code,
+      message: failure.message,
+      ...(failure.providerRetryAfterMs !== undefined
+        ? { retryAfterMs: failure.providerRetryAfterMs }
+        : {}),
+    })
+    if (this.cooldowns.size > 500) {
+      for (const [entryKey, state] of this.cooldowns) {
+        if (state.until <= now) this.cooldowns.delete(entryKey)
+      }
+    }
+  }
+
+  private rememberRoute(
+    provider: string,
+    model: string,
+    sessionId: string | undefined,
+    accountId: string,
+  ): void {
+    const key = conversationKey(provider, model, sessionId)
+    this.sticky.delete(key)
+    this.sticky.set(key, accountId)
+    if (this.sticky.size > 200) {
+      const oldest = this.sticky.keys().next().value
+      if (oldest !== undefined) this.sticky.delete(oldest)
+    }
+  }
+
+  private coolingFailure(
+    descriptor: ChannelDescriptor,
+    provider: string,
+    accounts: readonly AccountPayload[],
+    model: string,
+  ): LlmFailure {
+    const now = Date.now()
+    let soonest: CooldownState | undefined
+    for (const account of accounts) {
+      const state = this.cooldownFor(provider, account.accountId, model, now)
+      if (state && (!soonest || state.until < soonest.until)) soonest = state
+    }
+    const wait = Math.max(0, (soonest?.until ?? now) - now)
+    const seconds = Math.max(1, Math.ceil(wait / 1000))
+    return {
+      message:
+        `${descriptor.displayName}: ` +
+        (accounts.length === 1
+          ? `the account is cooling down; retry in ${seconds}s`
+          : `all ${accounts.length} accounts are cooling down; retry in ${seconds}s`),
+      code: soonest?.code ?? 'RATE_LIMIT',
+      ...(wait > 0 ? { providerRetryAfterMs: wait } : {}),
+    }
   }
 
   async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
@@ -155,7 +284,7 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       const accounts = await this.options.accounts.list(descriptor.id)
       const sources: readonly Pick<
         AccountPayload,
-        'accountId' | 'auth' | 'freeOnly' | 'hiddenModels'
+        'accountId' | 'auth' | 'freeOnly' | 'hiddenModels' | 'proxy'
       >[] =
         accounts.length > 0
           ? accounts
@@ -165,12 +294,21 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
 
       const byId = new Map<string, ModelRecord>()
       for (const account of sources) {
-        const models = await this.options.worker.models({
-          channel: loadInfo,
-          accountId: account.accountId,
-          auth: account.auth,
-          freeOnly: account.freeOnly !== false,
-        })
+        let models: readonly ChannelModelRecord[]
+        try {
+          models = await this.options.worker.models({
+            channel: loadInfo,
+            accountId: account.accountId,
+            auth: account.auth,
+            freeOnly: account.freeOnly !== false,
+            ...(account.proxy ? { proxy: account.proxy } : {}),
+          })
+        } catch (error) {
+          this.options.logger.warn(
+            `dsh-hitchfin: listing ${descriptor.displayName} models for ${account.accountId} failed: ${errorMessage(error)}`,
+          )
+          continue
+        }
         const hidden = new Set(account.hiddenModels ?? [])
         const hasFreeMetadata = models.some((model) => model.freeKnown)
         const usable =
@@ -292,17 +430,17 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       return
     }
 
-    let account: AccountPayload | undefined
+    let accountList: readonly AccountPayload[] = []
     try {
-      const accounts = await this.options.accounts.list(descriptor.id)
-      account = accounts.find((entry) => entry.auth !== undefined) ?? accounts[0]
+      accountList = await this.options.accounts.list(descriptor.id)
     } catch (error) {
       this.options.logger.warn(
         `dsh-hitchfin: reading accounts for ${descriptor.displayName} failed: ${errorMessage(error)}`,
       )
     }
 
-    if (!account) {
+    const signedIn = accountList.filter((entry) => entry.auth !== undefined)
+    if (signedIn.length === 0) {
       yield {
         type: 'finish',
         reason: {
@@ -316,39 +454,102 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       return
     }
 
-    // Each request owns its worker call; a shared "current request" field would
-    // cross two concurrent chats.
-    const transport = createOpenAiSseTransport((input, init) =>
-      this.options.worker.fetch(input, init, {
-        channel: loadInfo,
-        accountId: account.accountId,
-        auth: account.auth,
-        freeOnly: account.freeOnly !== false,
-        model: options.model,
-        sessionId: options.sessionId,
-      } satisfies ChannelCallOptions & { sessionId?: string }),
+    const now = Date.now()
+    const stickyId = this.sticky.get(
+      conversationKey(options.provider, options.model, options.sessionId),
     )
+    const eligible = signedIn
+      .filter(
+        (entry) =>
+          this.cooldownFor(options.provider, entry.accountId, options.model, now) === undefined,
+      )
+      .sort(
+        (left, right) =>
+          Number(right.accountId === stickyId) - Number(left.accountId === stickyId),
+      )
 
-    try {
-      const upstream = transport({
-        provider: options.provider,
-        modelId: options.model,
-        messages: options.messages,
-        options,
-        signal: options.signal,
-        sessionId: options.sessionId,
-      })
-      for await (const chunk of upstream) {
-        yield chunk
-      }
-    } catch (error) {
+    if (eligible.length === 0) {
       yield {
         type: 'finish',
         reason: {
-          kind: options.signal?.aborted ? 'aborted' : 'error',
-          failure: failureOf(error, options.signal),
+          kind: 'error',
+          failure: this.coolingFailure(descriptor, options.provider, signedIn, options.model),
         },
       }
+      return
+    }
+
+    let lastFailure: LlmFailure | undefined
+    for (const account of eligible) {
+      if (options.signal?.aborted) {
+        yield {
+          type: 'finish',
+          reason: { kind: 'aborted', failure: { message: 'request aborted', code: 'ABORTED' } },
+        }
+        return
+      }
+
+      // Each request owns its worker call; a shared "current request" field
+      // would cross two concurrent chats.
+      const transport = createOpenAiSseTransport((input, init) =>
+        this.options.worker.fetch(input, init, {
+          channel: loadInfo,
+          accountId: account.accountId,
+          auth: account.auth,
+          freeOnly: account.freeOnly !== false,
+          model: options.model,
+          sessionId: options.sessionId,
+          ...(account.proxy ? { proxy: account.proxy } : {}),
+        } satisfies ChannelCallOptions & { sessionId?: string }),
+      )
+
+      let emitted = false
+      try {
+        const upstream = transport({
+          provider: options.provider,
+          modelId: options.model,
+          messages: options.messages,
+          options,
+          signal: options.signal,
+          sessionId: options.sessionId,
+        })
+        for await (const chunk of upstream) {
+          emitted = true
+          yield chunk
+        }
+        this.rememberRoute(options.provider, options.model, options.sessionId, account.accountId)
+        return
+      } catch (error) {
+        const failure = failureOf(error, options.signal)
+        if (failure.code === 'ABORTED') {
+          yield { type: 'finish', reason: { kind: 'aborted', failure } }
+          return
+        }
+        this.noteFailure(options.provider, account.accountId, options.model, failure)
+        lastFailure = failure
+        if (emitted) {
+          this.options.logger.warn(
+            `dsh-hitchfin: ${descriptor.displayName} stream failed after content on ${account.accountId} (${failure.code})`,
+          )
+          yield { type: 'finish', reason: { kind: 'error', failure } }
+          return
+        }
+        this.options.logger.warn(
+          `dsh-hitchfin: ${descriptor.displayName} account ${account.accountId} failed (${failure.code}); trying another account`,
+        )
+      }
+    }
+
+    yield {
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure:
+          lastFailure ?? {
+            message: `${descriptor.displayName}: no account accepted the request`,
+            code: 'SERVER',
+          },
+      },
     }
   }
 

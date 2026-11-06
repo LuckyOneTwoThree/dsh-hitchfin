@@ -8,6 +8,70 @@ const authSessions = new Map()
 const streams = new Map()
 let nextAuthSession = 1
 
+const nativeFetch = globalThis.fetch
+let undiciModule = null
+let undiciLoading = null
+const proxyAgents = new Map()
+
+function undici() {
+  undiciLoading ??= import('undici')
+    .then((module) => (undiciModule = module))
+    .catch(() => {
+      throw Object.assign(
+        new Error('proxy support is unavailable: install the undici dependency'),
+        { code: 'PROXY' },
+      )
+    })
+  return undiciLoading
+}
+
+function normalizeProxy(value) {
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  let url
+  try {
+    url = new URL(value.trim())
+  } catch {
+    throw Object.assign(new Error('代理地址无效，需要 HTTP(S) 代理 URL'), { code: 'PROXY' })
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw Object.assign(new Error('代理地址必须以 http:// 或 https:// 开头'), { code: 'PROXY' })
+  }
+  return url.toString()
+}
+
+async function dispatcherFor(proxy) {
+  const normalized = normalizeProxy(proxy)
+  if (!normalized) return undefined
+  const cached = proxyAgents.get(normalized)
+  if (cached) return cached
+  const module = await undici()
+  if (typeof module.ProxyAgent !== 'function') {
+    throw Object.assign(new Error('undici ProxyAgent is unavailable'), { code: 'PROXY' })
+  }
+  const agent = new module.ProxyAgent(normalized)
+  proxyAgents.set(normalized, agent)
+  return agent
+}
+
+// Channel packages call bare `fetch`. Route those calls through the account's
+// proxy when the current operation carries one, without leaking the proxy
+// between concurrent accounts.
+globalThis.fetch = async function hitchfinFetch(input, init) {
+  const dispatcher = scope.getStore()?.dispatcher
+  if (!dispatcher) return nativeFetch(input, init)
+  const module = await undici()
+  const request = input instanceof Request ? input : null
+  const options = { ...(init ?? {}), dispatcher }
+  if (request) {
+    options.method = init?.method ?? request.method
+    options.headers = init?.headers ?? request.headers
+    if (init?.body === undefined && request.body !== null) {
+      options.body = await request.clone().arrayBuffer()
+    }
+  }
+  return module.fetch(request ? request.url : String(input), options)
+}
+
 function post(message) {
   parentPort?.postMessage(message)
 }
@@ -56,6 +120,7 @@ function makeClient(channelId) {
         const body = opts?.body ?? opts?.auth
         const current = scope.getStore()
         if (body && current?.accountId) {
+          current.auth = body
           post({
             type: 'authChanged',
             channelId,
@@ -93,11 +158,18 @@ function makeClient(channelId) {
 
 function makeMagpie(state) {
   return {
-    option: (key) => state.options[key],
+    option: (...args) => {
+      const key = args.length === 1 ? args[0] : args[1]
+      const current = scope.getStore()
+      if (key === 'free_only' && typeof current?.freeOnly === 'boolean') {
+        return current.freeOnly
+      }
+      return state.options[key]
+    },
     options: () => state.options,
     load: () => {},
     usage: () => {},
-    account: () => '',
+    account: () => scope.getStore()?.accountId ?? '',
   }
 }
 
@@ -249,15 +321,28 @@ async function handleDescribe(message) {
 
 async function handleModels(message) {
   const loaded = await loadChannel(message.channel)
+  const dispatcher = await dispatcherFor(message.proxy)
   loaded.state.options.free_only = Boolean(message.freeOnly)
-  const base = await staticModels(loaded)
+  const base = await scope.run(
+    {
+      channelId: message.channel.channelId,
+      accountId: message.accountId,
+      ...(dispatcher ? { dispatcher } : {}),
+    },
+    () => staticModels(loaded),
+  )
   let models = base
 
   if (message.auth && typeof loaded.hooks?.provider?.models === 'function') {
     const auth = message.auth
     try {
       const live = await scope.run(
-        { channelId: message.channel.channelId, accountId: message.accountId, auth },
+        {
+          channelId: message.channel.channelId,
+          accountId: message.accountId,
+          auth,
+          ...(dispatcher ? { dispatcher } : {}),
+        },
         () => loaded.hooks.provider.models({ id: loaded.provider, models: base }, { auth }),
       )
       if (live && typeof live === 'object' && !Array.isArray(live)) models = live
@@ -296,8 +381,14 @@ async function handleUsage(message) {
   }
   const auth = message.auth
   if (!auth) return { usage: { error: 'not signed in' } }
+  const dispatcher = await dispatcherFor(message.proxy)
   const usage = await scope.run(
-    { channelId: message.channel.channelId, accountId: message.accountId, auth },
+    {
+      channelId: message.channel.channelId,
+      accountId: message.accountId,
+      auth,
+      ...(dispatcher ? { dispatcher } : {}),
+    },
     () => loaded.hooks.auth.usage(getAuth, loaded.provider),
   )
   return { usage: usage ?? {} }
@@ -312,10 +403,18 @@ async function handleAuthorize(message) {
   }
 
   const controller = new AbortController()
+  const proxy = normalizeProxy(message.proxy)
+  const dispatcher = await dispatcherFor(proxy)
   const inputs =
-    Array.isArray(method.prompts) && method.prompts.length > 0 ? message.inputs ?? {} : undefined
+    message.inputs ??
+    (Array.isArray(method.prompts) && method.prompts.length > 0 ? {} : undefined)
   const started = await scope.run(
-    { channelId: message.channel.channelId, accountId: message.accountId, auth: undefined },
+    {
+      channelId: message.channel.channelId,
+      accountId: message.accountId,
+      auth: undefined,
+      ...(dispatcher ? { dispatcher } : {}),
+    },
     () => method.authorize(inputs, { signal: controller.signal }),
   )
 
@@ -334,6 +433,7 @@ async function handleAuthorize(message) {
     method: started.method === 'code' ? 'code' : 'auto',
     callback: started.callback,
     controller,
+    proxy,
   })
 
   return {
@@ -374,9 +474,15 @@ async function handleCallback(message) {
   const session = authSessions.get(message.session)
   if (!session) throw new Error('no such sign-in session')
   authSessions.delete(message.session)
+  const dispatcher = await dispatcherFor(session.proxy)
 
   const result = await scope.run(
-    { channelId: session.channelId, accountId: session.accountId, auth: undefined },
+    {
+      channelId: session.channelId,
+      accountId: session.accountId,
+      auth: undefined,
+      ...(dispatcher ? { dispatcher } : {}),
+    },
     () =>
       session.callback(
         session.method === 'code' ? message.code ?? '' : undefined,
@@ -411,6 +517,7 @@ async function handleFetch(message) {
   const controller = new AbortController()
   streams.set(message.id, controller)
   loaded.state.options.free_only = Boolean(message.freeOnly)
+  const dispatcher = await dispatcherFor(message.proxy)
 
   try {
     await scope.run(
@@ -419,6 +526,7 @@ async function handleFetch(message) {
         accountId: message.accountId,
         auth,
         freeOnly: Boolean(message.freeOnly),
+        ...(dispatcher ? { dispatcher } : {}),
       },
       async () => {
         const chatHeaders = {}

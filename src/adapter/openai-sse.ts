@@ -51,7 +51,37 @@ export function buildOpenAiMessages(
         break
       }
       case 'user': {
-        out.push({ role: 'user', content: flattenContentToText(msg.content) })
+        const parts: Array<Record<string, unknown>> = []
+        for (const block of msg.content) {
+          if (block.type === 'text' && typeof block.text === 'string') {
+            parts.push({ type: 'text', text: block.text })
+          } else if (block.type === 'image' || block.type === 'image_url') {
+            const record = block as Record<string, unknown>
+            if (record.image_url && typeof record.image_url === 'object') {
+              parts.push({ type: 'image_url', image_url: record.image_url })
+            } else if (typeof record.url === 'string') {
+              parts.push({ type: 'image_url', image_url: { url: record.url } })
+            } else if (typeof record.image === 'string') {
+              const mime = typeof record.mimeType === 'string' ? record.mimeType : 'image/png'
+              const url = record.image.startsWith('data:')
+                ? record.image
+                : `data:${mime};base64,${record.image}`
+              parts.push({ type: 'image_url', image_url: { url } })
+            } else if (record.source && typeof record.source === 'object') {
+              const src = record.source as Record<string, unknown>
+              if (src.type === 'base64' && typeof src.data === 'string') {
+                const mime = typeof src.media_type === 'string' ? src.media_type : 'image/png'
+                parts.push({ type: 'image_url', image_url: { url: `data:${mime};base64,${src.data}` } })
+              }
+            }
+          }
+        }
+        const hasImages = parts.some((part) => part.type === 'image_url')
+        if (hasImages) {
+          out.push({ role: 'user', content: parts })
+        } else {
+          out.push({ role: 'user', content: flattenContentToText(msg.content) })
+        }
         break
       }
       case 'assistant': {
@@ -92,9 +122,13 @@ export function buildOpenAiMessages(
       }
       case 'tool': {
         const toolCallId =
-          msg.source && typeof msg.source === 'object' && typeof msg.source.toolCallId === 'string'
+          (msg.source && typeof msg.source === 'object' && typeof msg.source.toolCallId === 'string'
             ? msg.source.toolCallId
-            : ''
+            : undefined) ??
+          (typeof msg.toolCallId === 'string' ? msg.toolCallId : undefined) ??
+          (typeof (msg as Record<string, unknown>).tool_call_id === 'string'
+            ? ((msg as Record<string, unknown>).tool_call_id as string)
+            : '')
         out.push({
           role: 'tool',
           tool_call_id: toolCallId,
@@ -221,7 +255,18 @@ export function createOpenAiSseTransport(
       let detail = ''
       try {
         const text = await response.text()
-        if (text) detail = `: ${text.slice(0, 300)}`
+        if (text) {
+          try {
+            const parsed = JSON.parse(text) as { error?: { message?: string } }
+            if (parsed.error?.message) {
+              detail = `: ${parsed.error.message}`
+            } else {
+              detail = `: ${text.slice(0, 300)}`
+            }
+          } catch {
+            detail = `: ${text.slice(0, 300)}`
+          }
+        }
       } catch {
         // The body is diagnostic only.
       }
@@ -243,11 +288,22 @@ export function createOpenAiSseTransport(
     const contentType = response.headers.get('content-type') ?? ''
     if (contentType.includes('application/json')) {
       const text = await response.text()
-      throw new HitchfinError(
-        `channel returned JSON instead of a stream: ${text.slice(0, 300)}`,
-        'SERVER',
-        { status: response.status },
-      )
+      let msg = text.slice(0, 300)
+      let code = 'SERVER'
+      try {
+        const parsed = JSON.parse(text) as Record<string, unknown>
+        const errObj = parsed.error as Record<string, unknown> | undefined
+        if (typeof errObj?.message === 'string') msg = errObj.message
+        else if (typeof parsed.msg === 'string') msg = parsed.msg
+        else if (typeof parsed.message === 'string') msg = parsed.message
+
+        if (errObj?.code === 401 || errObj?.code === 'AUTH' || parsed.code === 401) {
+          code = 'AUTH'
+        }
+      } catch {}
+      throw new HitchfinError(`channel returned JSON instead of a stream: ${msg}`, code, {
+        status: response.status,
+      })
     }
 
     let nextBlockIndex = 0

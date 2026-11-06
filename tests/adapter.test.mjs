@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { HitchfinAdapter, SPIKE_PROVIDER } from '../lib/adapter/hitchfin-adapter.js'
+import { buildOpenAiMessages } from '../lib/adapter/openai-sse.js'
+import { HitchfinError } from '../lib/errors.js'
 import { dedupeModels } from '../lib/models.js'
 
 const descriptor = {
@@ -94,6 +96,51 @@ function makeWorker() {
     ],
     fetch: async () => sseResponse(),
   }
+}
+
+function account(accountId, overrides = {}) {
+  return {
+    channelId: descriptor.id,
+    accountId,
+    label: `Test ${accountId}`,
+    auth: { type: 'oauth', access: `token-${accountId}` },
+    freeOnly: true,
+    createdAt: 0,
+    updatedAt: 0,
+    ...overrides,
+  }
+}
+
+function brokenSseResponse(text = 'partial') {
+  const encoder = new TextEncoder()
+  let stage = 0
+  return new Response(
+    new ReadableStream({
+      pull(controller) {
+        if (stage === 0) {
+          stage = 1
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
+              })}\n\n`,
+            ),
+          )
+          return
+        }
+        controller.error(new Error('socket closed'))
+      },
+    }),
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  )
+}
+
+function collect(stream) {
+  return (async () => {
+    const chunks = []
+    for await (const chunk of stream) chunks.push(chunk)
+    return chunks
+  })()
 }
 
 const logger = { info() {}, warn() {}, error() {} }
@@ -241,4 +288,141 @@ test('channel adapter asks for sign-in when no account exists', async () => {
   assert.equal(chunks[0].type, 'finish')
   assert.equal(chunks[0].reason.kind, 'error')
   assert.equal(chunks[0].reason.failure.code, 'AUTH')
+})
+
+test('adapter fails over to a second account and sticks to it', async () => {
+  const calls = []
+  const worker = {
+    models: makeWorker().models,
+    fetch: async (_input, _init, options) => {
+      calls.push(options.accountId)
+      if (options.accountId === 'acct-1') {
+        throw new HitchfinError('token expired', 'AUTH', { status: 401 })
+      }
+      return sseResponse('from acct-2')
+    },
+  }
+  const adapter = makeAdapter({
+    accounts: makeAccounts([account('acct-1'), account('acct-2')]),
+    worker,
+  })
+
+  const first = await collect(
+    adapter.stream({ provider: descriptor.providerId, model: 'free-model', messages: [] }),
+  )
+  assert.equal(first.find((chunk) => chunk.type === 'text-delta').text, 'from acct-2')
+  assert.equal(first.at(-1).type, 'finish')
+  assert.equal(first.at(-1).reason.kind, 'stop')
+  assert.deepEqual(calls, ['acct-1', 'acct-2'])
+
+  const second = await collect(
+    adapter.stream({ provider: descriptor.providerId, model: 'free-model', messages: [] }),
+  )
+  assert.equal(second.find((chunk) => chunk.type === 'text-delta').text, 'from acct-2')
+  assert.deepEqual(calls, ['acct-1', 'acct-2', 'acct-2'])
+})
+
+test('adapter refuses while every account is cooling down', async () => {
+  let calls = 0
+  const worker = {
+    models: makeWorker().models,
+    fetch: async () => {
+      calls += 1
+      throw new HitchfinError('token expired', 'AUTH', { status: 401 })
+    },
+  }
+  const adapter = makeAdapter({ accounts: makeAccounts([account('acct-1')]), worker })
+
+  const first = await collect(
+    adapter.stream({ provider: descriptor.providerId, model: 'free-model', messages: [] }),
+  )
+  assert.equal(first.at(-1).reason.kind, 'error')
+  assert.equal(first.at(-1).reason.failure.code, 'AUTH')
+
+  const second = await collect(
+    adapter.stream({ provider: descriptor.providerId, model: 'free-model', messages: [] }),
+  )
+  const failure = second.at(-1).reason.failure
+  assert.equal(second.at(-1).reason.kind, 'error')
+  assert.match(failure.message, /cooling down/)
+  assert.ok(failure.providerRetryAfterMs > 0)
+  assert.equal(calls, 1)
+})
+
+test('adapter does not switch accounts after content has been emitted', async () => {
+  const calls = []
+  const worker = {
+    models: makeWorker().models,
+    fetch: async (_input, _init, options) => {
+      calls.push(options.accountId)
+      return brokenSseResponse('partial text')
+    },
+  }
+  const adapter = makeAdapter({
+    accounts: makeAccounts([account('acct-1'), account('acct-2')]),
+    worker,
+  })
+
+  const chunks = await collect(
+    adapter.stream({ provider: descriptor.providerId, model: 'free-model', messages: [] }),
+  )
+  assert.equal(chunks.find((chunk) => chunk.type === 'text-delta').text, 'partial text')
+  assert.equal(chunks.at(-1).type, 'finish')
+  assert.equal(chunks.at(-1).reason.kind, 'error')
+  assert.deepEqual(calls, ['acct-1'])
+})
+
+test('adapter forwards the account proxy for models and chat', async () => {
+  const seen = []
+  const worker = {
+    models: async (options) => {
+      seen.push(`models:${options.proxy ?? ''}`)
+      return makeWorker().models()
+    },
+    fetch: async (_input, _init, options) => {
+      seen.push(`fetch:${options.proxy ?? ''}`)
+      return sseResponse()
+    },
+  }
+  const proxy = 'http://127.0.0.1:7890'
+  const adapter = makeAdapter({
+    accounts: makeAccounts([account('acct-1', { proxy })]),
+    worker,
+  })
+
+  await adapter.listModels(descriptor.providerId)
+  await collect(
+    adapter.stream({ provider: descriptor.providerId, model: 'free-model', messages: [] }),
+  )
+  assert.deepEqual(seen, [`models:${proxy}`, `fetch:${proxy}`])
+})
+
+test('buildOpenAiMessages handles multimodal images and direct toolCallId', () => {
+  const messages = [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is in this image?' },
+        { type: 'image', image: 'abc123base64', mimeType: 'image/jpeg' },
+      ],
+    },
+    {
+      role: 'tool',
+      toolCallId: 'call_999',
+      content: [{ type: 'text', text: 'result text' }],
+    },
+  ]
+  const built = buildOpenAiMessages(messages, 'system prompt')
+  assert.equal(built.length, 3)
+  assert.deepEqual(built[0], { role: 'system', content: 'system prompt' })
+  assert.equal(built[1].role, 'user')
+  assert.deepEqual(built[1].content, [
+    { type: 'text', text: 'what is in this image?' },
+    { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,abc123base64' } },
+  ])
+  assert.deepEqual(built[2], {
+    role: 'tool',
+    tool_call_id: 'call_999',
+    content: 'result text',
+  })
 })
