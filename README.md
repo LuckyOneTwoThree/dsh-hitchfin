@@ -24,6 +24,8 @@ Phase 0–3 的核心骨架已完成：
 - WorkBuddy 支持浏览器 / 桌面 / API Key 三种登录方式。
 - 渠道包随插件以固定版本 optionalDependencies 安装（WorkBuddy / Qoder / Trae），不再依赖 magpie 安装目录。
 - Qoder CN 浏览器登录与 PAT 输入链路已验证；Trae CN 浏览器登录启动已验证，取消会释放本地回调端口。
+- Trae CN live 目录的 90 个内部 ID 已按显示名去重为 68 个模型；`-Official`、`_advisor_`、`Doubao_1_6` 等别名合并，空名称过滤。
+- Trae CN 不提供免费/付费标记，因此显示全部模型并禁用“仅免费模型”过滤；WorkBuddy/Qoder 仍按免费标记过滤。
 - 设置页首屏快速渲染，额度异步补齐；模型可见性、仅免费模型、套餐/额度均已接入。
 - 已确认 DSH 模型目录包含 `hitchfin-workbuddy-cn`、`hitchfin-qoder-cn`、`hitchfin-trae-cn`。
 
@@ -46,14 +48,14 @@ npm pack
 Web profile 可以直接用 DSH CLI 安装：
 
 ```sh
-dsh plugin --profile web add /path/to/dsh-hitchfin-0.1.0.tgz
+dsh plugin --profile web add /path/to/dsh-hitchfin-<version>.tgz
 ```
 
 桌面版需要注意：**desktop profile 由 Electron 应用独占，`dsh plugin --profile desktop` 会被拒绝**。请在 DSH 桌面版的插件页安装本仓库 / 本地 tarball，或由维护者按以下方式安装：
 
 ```sh
 cd ~/.dsh/profiles/desktop
-pnpm add /path/to/dsh-hitchfin-0.1.0.tgz
+pnpm add /path/to/dsh-hitchfin-<version>.tgz
 # 并把 "dsh-hitchfin" 加入 package.json 的 dsh.profile.bundles
 ```
 

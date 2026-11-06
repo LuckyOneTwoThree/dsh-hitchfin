@@ -982,7 +982,9 @@ WorkBuddy 实测（2026-11-06，已完成）：
 - WorkBuddy 三种登录方式：浏览器、桌面登录、API Key；API Key 的 worker 路径已验证为 `{type:"api", key}`。
 - 设置页首屏约 0.4 秒（先渲染渠道/模型，额度异步补齐）。
 - 修复：占位 URL 改为渠道真实 base URL（WorkBuddy `copilot.tencent.com/v2`）；修复 `modelsChanged` 递归导致缓存不失效。
-- 分发验证：`npm pack` 后在全新临时 DSH profile 执行 `dsh plugin --profile web add dsh-hitchfin-0.1.0.tgz`：
+- Trae CN 模型去重：live 目录 90 个唯一 ID、69 个显示名，按显示名合并后为 68 个模型；`-Official`、`_advisor_`、`Doubao_1_6` 等别名优先保留规范 ID，空名称 `-` 过滤。
+- Trae CN 不提供 free/paid 标记：不再在 free-only 下隐藏全部模型；设置页显示“该渠道不提供免费/付费标记，显示全部模型”，并禁用该渠道的仅免费开关。WorkBuddy/Qoder 保持按 free 标记过滤。
+- 分发验证：`npm pack` 后在全新临时 DSH profile 执行 `dsh plugin --profile web add dsh-hitchfin-<version>.tgz`：
   - 插件自动进入 profile bundles
   - WorkBuddy / Qoder / Trae optional 渠道包自动安装
   - 三个渠道均显示可用；无账号时模型目录为空；生产模式无 spike provider
@@ -1011,7 +1013,7 @@ Phase 5 主桌面安装（2026-11-06，已完成加载验证）：
 
 - 备份 `~/.dsh/profiles/desktop` 的 `package.json`、`cordis.patch.yml`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.yml` 到 `~/.dsh/backups/dsh-hitchfin-<timestamp>`。
 - `dsh plugin --profile desktop add` 被 CLI 拒绝（Electron 独占 profile），改用：
-  - `pnpm add /path/to/dsh-hitchfin-0.1.0.tgz`
+  - `pnpm add /path/to/dsh-hitchfin-<version>.tgz`
   - 把 `dsh-hitchfin` 加入 `dsh.profile.bundles`
 - compose 校验：`dsh-hitchfin` 已插入；magpie 的 `llm-pi-ai` providers 和 `agent-default-model`（Trae CN）保持不变。
 - 重启桌面版后通过 CDP 确认渲染器实际渲染：设置侧栏出现「订阅接入」，WorkBuddy/Qoder/Trae 三张渠道卡和登录方式均显示；账号为空。

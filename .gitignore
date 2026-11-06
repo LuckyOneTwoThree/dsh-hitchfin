@@ -1,9 +1,9 @@
 node_modules/
-lib/
-dist/
-client/
+/lib/
+/dist/
+/client/
 *.log
 .DS_Store
 tmp/
 *.tgz
-magpie/
+/magpie/

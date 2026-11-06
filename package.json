@@ -1,6 +1,6 @@
 {
   "name": "dsh-hitchfin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Free subscription bridge for DeepSeek Harness: WorkBuddy, Qoder and Trae models inside DSH.",
   "type": "module",
   "main": "lib/index.js",

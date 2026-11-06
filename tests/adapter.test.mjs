@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { HitchfinAdapter, SPIKE_PROVIDER } from '../lib/adapter/hitchfin-adapter.js'
+import { dedupeModels } from '../lib/models.js'
 
 const descriptor = {
   id: 'workbuddy-cn',
@@ -169,6 +170,61 @@ test('channel adapter streams through the worker SSE proxy', async () => {
   assert.equal(chunks[3].usage.inputTokens, 2)
   assert.equal(chunks[3].usage.outputTokens, 3)
   assert.equal(chunks[4].reason.kind, 'stop')
+})
+
+test('dedupeModels keeps canonical ids for duplicate display names', () => {
+  const models = dedupeModels([
+    { id: 'glm-5.2_advisor_doubao', name: 'GLM-5.2', free: false, freeKnown: false },
+    { id: 'glm-5.2', name: 'GLM-5.2', free: false, freeKnown: false },
+    { id: 'glm-5.2-max', name: 'GLM-5.2 (Max)', free: false, freeKnown: false },
+    { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash', free: false, freeKnown: false },
+    { id: 'DeepSeek-V4-Flash', name: 'DeepSeek-V4-Flash', free: false, freeKnown: false },
+    { id: 'Doubao_1_6', name: 'Seed-Code', free: false, freeKnown: false },
+    { id: 'Doubao-Seed-Code', name: 'Seed-Code', free: false, freeKnown: false },
+    { id: 'broken', name: '-', free: false, freeKnown: false },
+  ])
+  assert.deepEqual(
+    models.map((model) => model.id).sort(),
+    ['DeepSeek-V4-Flash', 'Doubao-Seed-Code', 'glm-5.2', 'glm-5.2-max'],
+  )
+})
+
+test('channel adapter shows all models when free metadata is unknown', async () => {
+  const account = {
+    channelId: descriptor.id,
+    accountId: 'acct-1',
+    label: 'Test',
+    auth: { type: 'oauth', access: 'token' },
+    freeOnly: true,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  const worker = {
+    models: async () => [
+      {
+        id: 'trae-a',
+        name: 'Trae A',
+        contextWindow: 100000,
+        input: ['text'],
+        efforts: [],
+        free: false,
+        freeKnown: false,
+      },
+      {
+        id: 'trae-a-alias',
+        name: 'Trae A',
+        contextWindow: 100000,
+        input: ['text'],
+        efforts: [],
+        free: false,
+        freeKnown: false,
+      },
+    ],
+    fetch: async () => sseResponse(),
+  }
+  const adapter = makeAdapter({ accounts: makeAccounts([account]), worker })
+  const models = await adapter.listModels(descriptor.providerId)
+  assert.deepEqual(models.map((model) => model.id), ['trae-a'])
 })
 
 test('channel adapter asks for sign-in when no account exists', async () => {

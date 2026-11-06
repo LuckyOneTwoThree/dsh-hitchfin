@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { errorMessage } from './errors.js'
+import { dedupeModels } from './models.js'
 import type { AccountPayload, AccountStore } from './accounts/store.js'
 import type { ChannelDescriptor } from './channels/descriptor.js'
 import type { ChannelRegistry } from './channels/registry.js'
@@ -203,7 +204,8 @@ export function registerHitchfinRoutes(
                 freeOnly: false,
               })
               const hidden = new Set(account.hiddenModels ?? [])
-              allModels = records.map((model) => ({
+              const unique = dedupeModels(records)
+              allModels = unique.map((model) => ({
                 id: model.id,
                 name: model.name,
                 free: model.free,
@@ -217,12 +219,13 @@ export function registerHitchfinRoutes(
               if (models.length === 0) {
                 // A cache from before a free-only change may still be warming;
                 // show what the worker sees rather than an empty configuration.
-                models = records
+                const hasFreeMetadata = records.some((model) => model.freeKnown)
+                const usable =
+                  account.freeOnly !== false && hasFreeMetadata
+                    ? records.filter((model) => model.freeKnown && model.free)
+                    : records
+                models = dedupeModels(usable)
                   .filter((model) => !hidden.has(model.id))
-                  .filter(
-                    (model) =>
-                      account.freeOnly === false || (model.freeKnown && model.free),
-                  )
                   .map((model) => ({ id: model.id, name: model.name, free: model.free }))
               }
             } catch {
@@ -261,6 +264,11 @@ export function registerHitchfinRoutes(
           displayName: descriptor.displayName,
           status: descriptor.status,
           packageAvailable,
+          freeStatusKnown: allModels.some((model) => model.freeKnown === true),
+          freeOnly:
+            accountList.length > 0
+              ? accountList.every((entry) => entry.freeOnly !== false)
+              : true,
           methods: descriptor.authMethods,
           accounts: accountList.map(publicAccount),
           models,

@@ -1,5 +1,6 @@
 import { createOpenAiSseTransport } from './openai-sse.js'
 import { HitchfinError, errorMessage } from '../errors.js'
+import { dedupeModels } from '../models.js'
 import type { AccountStore, AccountPayload } from '../accounts/store.js'
 import type { ChannelDescriptor } from '../channels/descriptor.js'
 import type { ChannelRegistry } from '../channels/registry.js'
@@ -171,15 +172,20 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
           freeOnly: account.freeOnly !== false,
         })
         const hidden = new Set(account.hiddenModels ?? [])
+        const hasFreeMetadata = models.some((model) => model.freeKnown)
         const usable =
-          account.freeOnly !== false
+          account.freeOnly !== false && hasFreeMetadata
             ? models.filter((model) => model.freeKnown && model.free)
             : models
-        if (account.freeOnly !== false && usable.length === 0 && models.length > 0) {
+        if (
+          account.freeOnly !== false &&
+          hasFreeMetadata &&
+          usable.length === 0 &&
+          models.length > 0
+        ) {
           this.options.logger.warn(
-            `dsh-hitchfin: ${descriptor.displayName} free status is unknown or no free model is available; hiding ${models.length} model(s) under free-only`,
+            `dsh-hitchfin: ${descriptor.displayName} has no free model available; hiding ${models.length} model(s) under free-only`,
           )
-          continue
         }
         for (const model of usable) {
           if (hidden.has(model.id)) continue
@@ -190,7 +196,9 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
         }
       }
 
-      const models = [...byId.values()].map((record) => modelInfo(descriptor, record))
+      const models = dedupeModels([...byId.values()]).map((record) =>
+        modelInfo(descriptor, record),
+      )
       this.cache.set(provider, { at: Date.now(), models })
       return models
     } catch (error) {
