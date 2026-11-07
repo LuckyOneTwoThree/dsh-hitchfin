@@ -1,4 +1,6 @@
 import { createOpenAiSseTransport } from './openai-sse.js'
+import { createAnthropicSseTransport } from './anthropic-sse.js'
+import { selectTransportProtocol, type TransportProtocol } from './protocol.js'
 import { HitchfinError, errorMessage } from '../errors.js'
 import { dedupeModels } from '../models.js'
 import type { AccountStore, AccountPayload } from '../accounts/store.js'
@@ -130,14 +132,21 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
   private readonly cache = new Map<string, ModelCacheEntry>()
   private readonly cooldowns = new Map<string, CooldownState>()
   private readonly sticky = new Map<string, string>()
+  /** provider + model -> request/stream protocol, filled while listing models. */
+  private readonly protocols = new Map<string, TransportProtocol>()
 
   constructor(private readonly options: HitchfinAdapterOptions) {}
 
   invalidate(provider?: string): void {
     if (provider) {
       this.cache.delete(provider)
+      const prefix = `${provider}\0`
+      for (const key of this.protocols.keys()) {
+        if (key.startsWith(prefix)) this.protocols.delete(key)
+      }
     } else {
       this.cache.clear()
+      this.protocols.clear()
     }
   }
 
@@ -223,6 +232,12 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       const oldest = this.sticky.keys().next().value
       if (oldest !== undefined) this.sticky.delete(oldest)
     }
+  }
+
+  private async protocolFor(provider: string, model: string): Promise<TransportProtocol> {
+    const key = `${provider}\0${model}`
+    if (!this.protocols.has(key)) await this.listModels(provider)
+    return this.protocols.get(key) ?? 'openai-completions'
   }
 
   private coolingFailure(
@@ -332,6 +347,10 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
             byId.set(model.id, { ...model, accountId: account.accountId })
           }
         }
+      }
+
+      for (const [id, record] of byId) {
+        this.protocols.set(`${provider}\0${id}`, selectTransportProtocol(descriptor, record))
       }
 
       const models = dedupeModels([...byId.values()]).map((record) =>
@@ -479,6 +498,8 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       return
     }
 
+    const protocol = await this.protocolFor(options.provider, options.model)
+
     let lastFailure: LlmFailure | undefined
     for (const account of eligible) {
       if (options.signal?.aborted) {
@@ -491,7 +512,7 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
 
       // Each request owns its worker call; a shared "current request" field
       // would cross two concurrent chats.
-      const transport = createOpenAiSseTransport((input, init) =>
+      const callFetch = (input: string, init: RequestInit) =>
         this.options.worker.fetch(input, init, {
           channel: loadInfo,
           accountId: account.accountId,
@@ -500,8 +521,11 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
           model: options.model,
           sessionId: options.sessionId,
           ...(account.proxy ? { proxy: account.proxy } : {}),
-        } satisfies ChannelCallOptions & { sessionId?: string }),
-      )
+        } satisfies ChannelCallOptions & { sessionId?: string })
+      const transport =
+        protocol === 'anthropic-messages'
+          ? createAnthropicSseTransport(callFetch)
+          : createOpenAiSseTransport(callFetch)
 
       let emitted = false
       try {

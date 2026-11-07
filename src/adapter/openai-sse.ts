@@ -7,7 +7,7 @@ import type {
   TokenUsage,
 } from '../types.js'
 
-const CHAT_URL = 'http://hitchfin.local/v1/chat/completions'
+export const CHAT_URL = 'http://hitchfin.local/v1/chat/completions'
 
 export type ChannelFetch = (input: string, init: RequestInit) => Promise<Response>
 
@@ -142,7 +142,7 @@ export function buildOpenAiMessages(
   return out
 }
 
-function parseRetryAfterMs(headerValue: string | null): number | undefined {
+export function parseRetryAfterMs(headerValue: string | null): number | undefined {
   if (!headerValue) return undefined
   const trimmed = headerValue.trim()
   const seconds = Number(trimmed)
@@ -188,7 +188,7 @@ interface OpenAiSseChunkPayload {
   }
 }
 
-function failureForStatus(status: number, detail: string): HitchfinError {
+export function failureForStatus(status: number, detail: string): HitchfinError {
   if (status === 401 || status === 403) {
     return new HitchfinError(`channel authentication failed (${status})${detail}`, 'AUTH', { status })
   }

@@ -1,5 +1,6 @@
 import { Worker } from 'node:worker_threads'
 import { HitchfinError, errorMessage } from '../errors.js'
+import type { ChannelProtocol } from '../channels/descriptor.js'
 
 export interface ChannelLoadInfo {
   channelId: string
@@ -28,6 +29,8 @@ export interface ChannelModelRecord {
   efforts: readonly string[]
   free: boolean
   freeKnown: boolean
+  /** Set by the channel package's model metadata (api/provider npm). */
+  protocol?: ChannelProtocol
 }
 
 export interface ChannelUsageRecord {
