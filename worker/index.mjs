@@ -1,7 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { pathToFileURL } from 'node:url'
 import { parentPort } from 'node:worker_threads'
-import { normalizeModels, channelUrl } from './channel-contract.mjs'
+import {
+  normalizeModels,
+  channelUrl,
+  redactError,
+  resolvePackageEntry,
+} from './channel-contract.mjs'
 
 const scope = new AsyncLocalStorage()
 const channels = new Map()
@@ -91,7 +96,7 @@ function serializeError(error) {
     cause && typeof cause === 'object' && typeof cause.code === 'string' ? cause.code : ''
   const base = error instanceof Error ? error.message : String(error)
   return {
-    message: causeMessage && !base.includes(causeMessage) ? `${base} (${causeMessage})` : base,
+    message: redactError(causeMessage && !base.includes(causeMessage) ? `${base} (${causeMessage})` : base),
     code: typeof error?.code === 'string' ? error.code : 'CHANNEL_ERROR',
     ...(causeCode ? { causeCode } : {}),
     ...(typeof error?.status === 'number' ? { status: error.status } : {}),
@@ -188,11 +193,12 @@ function factoryOf(mod, exportName) {
 }
 
 async function loadChannel(channel) {
-  const key = `${channel.channelId}\0${channel.packagePath}\0${channel.exportName}`
+  const entry = resolvePackageEntry(channel.channelId, channel.packagePath)
+  const key = `${channel.channelId}\0${entry}\0${channel.exportName}`
   const cached = channels.get(key)
   if (cached) return cached
 
-  const mod = await import(pathToFileURL(channel.packagePath).href)
+  const mod = await import(pathToFileURL(entry).href)
   const factory = factoryOf(mod, channel.exportName)
   if (!factory) {
     throw new Error(`${channel.channelId}: package exports no plugin factory`)
@@ -230,6 +236,11 @@ async function loadChannel(channel) {
     provider: typeof hooks?.auth?.provider === 'string' ? hooks.auth.provider : channel.provider,
   }
   channels.set(key, loaded)
+  post({
+    type: 'audit',
+    channelId: channel.channelId,
+    packagePath: entry,
+  })
   return loaded
 }
 
@@ -549,7 +560,7 @@ async function handleFetch(message) {
       },
     )
   } catch (error) {
-    console.error('[dsh-hitchfin worker] fetch failed:', error, error?.cause ?? '')
+    console.error('[dsh-hitchfin worker] fetch failed:', redactError(error))
     post({ id: message.id, type: 'error', error: serializeError(error) })
   } finally {
     streams.delete(message.id)
@@ -601,8 +612,8 @@ parentPort?.on('message', (message) => {
 })
 
 process.on('unhandledRejection', (error) => {
-  console.error('[dsh-hitchfin worker] unhandled rejection:', error)
+  console.error('[dsh-hitchfin worker] unhandled rejection:', redactError(error))
 })
 process.on('uncaughtException', (error) => {
-  console.error('[dsh-hitchfin worker] uncaught exception:', error)
+  console.error('[dsh-hitchfin worker] uncaught exception:', redactError(error))
 })

@@ -1,8 +1,10 @@
 /**
- * Pure channel-contract helpers: model-catalog normalization and sentinel URL
- * rewriting. Kept free of worker state so the protocol contract can be tested
- * without starting a Worker thread.
+ * Pure channel-contract helpers: model-catalog normalization, sentinel URL
+ * rewriting, package entry validation and error redaction. Kept free of worker
+ * state so the protocol contract can be tested without starting a Worker thread.
  */
+
+import { realpathSync } from 'node:fs'
 
 const ANTHROPIC_NPM = '@ai-sdk/anthropic'
 const VERTEX_ANTHROPIC_NPM = '@ai-sdk/google-vertex/anthropic'
@@ -77,4 +79,31 @@ export function channelUrl(loaded, options, original) {
   if (base.endsWith('/chat/completions')) return base
   if (/\/(?:v1|v2|v3)$/.test(base)) return base + '/chat/completions'
   return base + '/v1/chat/completions'
+}
+
+/** Strip credentials before an error is logged or sent back to the host. */
+export function redactError(error) {
+  const raw = error instanceof Error ? error.message : String(error ?? '')
+  return raw
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]')
+    .replace(/\b(?:sk|pk|jt|pt)-[A-Za-z0-9._-]{8,}/g, '[redacted]')
+    .replace(/([?&](?:token|key|api_key|access_token|signature|sig)=)[^&\s]+/gi, '$1[redacted]')
+    .slice(0, 300)
+}
+
+/** Resolve a channel package entry to a real, existing JS module path. */
+export function resolvePackageEntry(channelId, packagePath) {
+  if (typeof packagePath !== 'string' || !packagePath.trim()) {
+    throw new Error(`${channelId}: channel package path is missing`)
+  }
+  let real
+  try {
+    real = realpathSync(packagePath)
+  } catch {
+    throw new Error(`${channelId}: channel package entry not found`)
+  }
+  if (!/\.(?:mjs|js|cjs)$/.test(real)) {
+    throw new Error(`${channelId}: channel package entry must be a JS module`)
+  }
+  return real
 }
