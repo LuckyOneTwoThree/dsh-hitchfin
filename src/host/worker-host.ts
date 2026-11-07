@@ -80,8 +80,14 @@ interface StreamState {
 export interface ChannelWorkerHostOptions {
   workerPath?: URL
   onAuthChanged?: (channelId: string, accountId: string, auth: unknown) => void | Promise<void>
+  onAudit?: (event: { channelId: string; packagePath: string }) => void
   defaultTimeoutMs?: number
 }
+
+const CRASH_WINDOW_MS = 30_000
+const CRASH_THRESHOLD = 3
+const CIRCUIT_MS = 30_000
+const CANCEL_AUTH_MAX_WAIT_MS = 30_000
 
 function bytesFromBase64(data: string): Uint8Array {
   return Uint8Array.from(Buffer.from(data, 'base64'))
@@ -116,19 +122,52 @@ export class ChannelWorkerHost {
   private readonly pending = new Map<number, PendingCall>()
   private readonly streams = new Map<number, StreamState>()
   private readonly defaultTimeoutMs: number
+  private readonly expectedExits = new WeakSet<Worker>()
+  private crashCount = 0
+  private lastCrashAt = 0
+  private circuitOpenUntil = 0
+  private disposed = false
 
   constructor(private readonly options: ChannelWorkerHostOptions = {}) {
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 30_000
   }
 
+  /** Stop rebuilding a worker that keeps dying instead of hammering the host. */
+  private noteCrash(at: number): void {
+    this.crashCount = at - this.lastCrashAt > CRASH_WINDOW_MS ? 1 : this.crashCount + 1
+    this.lastCrashAt = at
+    if (this.crashCount >= CRASH_THRESHOLD) {
+      this.circuitOpenUntil = at + CIRCUIT_MS
+      this.crashCount = 0
+    }
+  }
+
   private ensureWorker(): Worker {
+    if (this.disposed) {
+      throw new HitchfinError('channel worker has been stopped', 'WORKER_STOPPED')
+    }
+    const now = Date.now()
+    if (this.circuitOpenUntil > now) {
+      const seconds = Math.ceil((this.circuitOpenUntil - now) / 1000)
+      throw new HitchfinError(`channel worker keeps failing; retry in ${seconds}s`, 'SERVER')
+    }
     if (this.worker) return this.worker
     const workerPath = this.options.workerPath ?? new URL('../../worker/index.mjs', import.meta.url)
     const worker = new Worker(workerPath)
+    let crashReported = false
+    const reportCrash = (): void => {
+      if (crashReported || this.expectedExits.has(worker)) return
+      crashReported = true
+      this.noteCrash(Date.now())
+    }
     worker.on('message', (message: unknown) => this.onMessage(message))
-    worker.on('error', (error) => this.failAll(error))
+    worker.on('error', (error) => {
+      reportCrash()
+      this.failAll(error)
+    })
     worker.on('exit', (code) => {
       if (this.worker === worker) this.worker = null
+      reportCrash()
       this.failAll(new Error(`channel worker exited with code ${code}`))
     })
     this.worker = worker
@@ -145,6 +184,13 @@ export class ChannelWorkerHost {
       if (channelId && accountId) {
         void this.options.onAuthChanged?.(channelId, accountId, message.auth)
       }
+      return
+    }
+
+    if (message.type === 'audit') {
+      const channelId = String(message.channelId ?? '')
+      const packagePath = String(message.packagePath ?? '')
+      if (channelId && packagePath) this.options.onAudit?.({ channelId, packagePath })
       return
     }
 
@@ -243,7 +289,17 @@ export class ChannelWorkerHost {
         timer,
         label: type,
       })
-      this.send({ id, type, ...payload })
+      try {
+        this.send({ id, type, ...payload })
+      } catch (error) {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        reject(
+          error instanceof Error
+            ? error
+            : new HitchfinError(errorMessage(error), 'CHANNEL_ERROR'),
+        )
+      }
     })
   }
 
@@ -329,24 +385,29 @@ export class ChannelWorkerHost {
     // Trae's browser sign-in opens a loopback callback server. Aborting its
     // signal is not enough to release that server, so recycle the worker once
     // the cancel message has been delivered and no streams are actively using it.
+    const startedAt = Date.now()
     setTimeout(() => {
+      if (this.disposed) return
       if (this.streams.size === 0) {
         void this.restart()
-      } else {
-        const check = setInterval(() => {
-          if (this.streams.size === 0) {
-            clearInterval(check)
-            void this.restart()
-          }
-        }, 1000)
+        return
       }
+      const check = setInterval(() => {
+        const timedOut = Date.now() - startedAt > CANCEL_AUTH_MAX_WAIT_MS
+        if (this.streams.size > 0 && !timedOut) return
+        clearInterval(check)
+        if (!this.disposed && this.streams.size === 0) void this.restart()
+      }, 1000)
     }, 500)
   }
 
   async restart(): Promise<void> {
     const worker = this.worker
     this.worker = null
-    if (worker) await worker.terminate().catch(() => {})
+    if (worker) {
+      this.expectedExits.add(worker)
+      await worker.terminate().catch(() => {})
+    }
   }
 
   async fetch(
@@ -393,26 +454,36 @@ export class ChannelWorkerHost {
         init.signal.addEventListener('abort', onAbort, { once: true })
       }
 
-      this.send({
-        id,
-        type: 'fetch',
-        channel: options.channel,
-        accountId: options.accountId ?? '',
-        auth: options.auth,
-        model: options.model ?? '',
-        sessionId: options.sessionId ?? '',
-        ...(options.proxy ? { proxy: options.proxy } : {}),
-        request: {
-          url: input,
-          method: init.method ?? 'POST',
-          headers,
-          body: typeof init.body === 'string' ? init.body : undefined,
-        },
-      })
+      try {
+        this.send({
+          id,
+          type: 'fetch',
+          channel: options.channel,
+          accountId: options.accountId ?? '',
+          auth: options.auth,
+          model: options.model ?? '',
+          sessionId: options.sessionId ?? '',
+          ...(options.proxy ? { proxy: options.proxy } : {}),
+          request: {
+            url: input,
+            method: init.method ?? 'POST',
+            headers,
+            body: typeof init.body === 'string' ? init.body : undefined,
+          },
+        })
+      } catch (error) {
+        this.streams.delete(id)
+        reject(
+          error instanceof Error
+            ? error
+            : new HitchfinError(errorMessage(error), 'CHANNEL_ERROR'),
+        )
+      }
     })
   }
 
   async stop(): Promise<void> {
+    this.disposed = true
     const worker = this.worker
     this.worker = null
     for (const pending of this.pending.values()) {
@@ -428,7 +499,10 @@ export class ChannelWorkerHost {
       }
     }
     this.streams.clear()
-    if (worker) await worker.terminate()
+    if (worker) {
+      this.expectedExits.add(worker)
+      await worker.terminate()
+    }
   }
 
   private failAll(error: Error): void {

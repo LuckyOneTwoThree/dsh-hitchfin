@@ -25,6 +25,9 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
     onAuthChanged: (channelId, accountId, auth) => {
       void accounts.updateAuth(channelId, accountId, auth)
     },
+    onAudit: ({ channelId, packagePath }) => {
+      ctx.logger.info(`dsh-hitchfin: loaded channel package ${channelId} from ${packagePath}`)
+    },
   })
 
   const devSpike = config.devSpike === true
@@ -60,14 +63,30 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
     })
 
   const routeServices = { registry, accounts, worker, adapter }
+  const cleanups: Array<() => void> = []
   if (typeof ctx.inject === 'function') {
     ctx.inject(['webServer'], (scope) => {
-      registerHitchfinRoutes(scope, routeServices)
+      cleanups.push(registerHitchfinRoutes(scope, routeServices))
     })
   } else if (ctx.webServer) {
-    registerHitchfinRoutes(ctx, routeServices)
+    cleanups.push(registerHitchfinRoutes(ctx, routeServices))
   } else {
     ctx.logger.warn('dsh-hitchfin: webServer is unavailable; settings routes are disabled')
+  }
+
+  // Best effort: hosts that expose a Cordis-style dispose hook get a clean
+  // teardown; older hosts keep the previous behaviour untouched.
+  if (typeof ctx.on === 'function') {
+    ctx.on('dispose', () => {
+      for (const cleanup of cleanups) {
+        try {
+          cleanup()
+        } catch {
+          // The host may already be tearing down its services.
+        }
+      }
+      void worker.stop()
+    })
   }
 
   if (ctx.authorization) {

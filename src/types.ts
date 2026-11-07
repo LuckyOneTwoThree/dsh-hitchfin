@@ -247,4 +247,6 @@ export interface HitchfinContext {
   inject?(deps: string[], callback: (scope: HitchfinContext) => void): void
   get?(name: string): unknown
   emit?(event: string, ...args: unknown[]): void
+  /** Cordis-style disposal hook; optional because older hosts may not expose it. */
+  on?(event: string, listener: (...args: unknown[]) => void): unknown
 }

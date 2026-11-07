@@ -229,12 +229,12 @@ async function resolveAccountId(
 export function registerHitchfinRoutes(
   ctx: HitchfinContext,
   services: HitchfinRouteServices,
-): void {
+): () => void {
   const { registry, accounts, worker, adapter } = services
   const server = ctx.webServer
   if (!server) {
     ctx.logger.warn('dsh-hitchfin: webServer is unavailable; settings routes are disabled')
-    return
+    return () => {}
   }
 
   const logins = new Map<string, LoginState>()
@@ -273,6 +273,7 @@ export function registerHitchfinRoutes(
     })
   }
 
+  let unregister: (() => void) | void
   void Promise.resolve(
     server.register({
       kind: 'prefix',
@@ -287,7 +288,9 @@ export function registerHitchfinRoutes(
         })
       },
     }),
-  )
+  ).then((fn) => {
+    if (typeof fn === 'function') unregister = fn
+  })
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (fenceRefused(ctx, req, res)) return
@@ -708,6 +711,17 @@ export function registerHitchfinRoutes(
       if (state.status === 'cancelled') return
       state.status = 'error'
       state.error = errorMessage(error)
+    }
+  }
+
+  return () => {
+    logins.clear()
+    if (typeof unregister === 'function') {
+      try {
+        unregister()
+      } catch {
+        // The host may already have torn down its routes.
+      }
     }
   }
 }
