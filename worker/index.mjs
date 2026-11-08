@@ -275,11 +275,12 @@ async function handleDescribe(message) {
 async function handleModels(message) {
   const loaded = await loadChannel(message.channel)
   const dispatcher = await dispatcherFor(message.proxy)
-  loaded.state.options.free_only = Boolean(message.freeOnly)
+  const freeOnly = Boolean(message.freeOnly)
   const base = await scope.run(
     {
       channelId: message.channel.channelId,
       accountId: message.accountId,
+      freeOnly,
       ...(dispatcher ? { dispatcher } : {}),
     },
     () => staticModels(loaded),
@@ -294,6 +295,7 @@ async function handleModels(message) {
           channelId: message.channel.channelId,
           accountId: message.accountId,
           auth,
+          freeOnly,
           ...(dispatcher ? { dispatcher } : {}),
         },
         () => loaded.hooks.provider.models({ id: loaded.provider, models: base }, { auth }),
@@ -469,7 +471,6 @@ async function handleFetch(message) {
 
   const controller = new AbortController()
   streams.set(message.id, controller)
-  loaded.state.options.free_only = Boolean(message.freeOnly)
   const dispatcher = await dispatcherFor(message.proxy)
 
   try {

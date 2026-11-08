@@ -12,8 +12,14 @@ import type { HitchfinContext, WebRoute } from './types.js'
 
 const PREFIX = '/dsh-hitchfin'
 const BODY_LIMIT = 64 * 1024
+const LOGIN_TTL_MS = 10 * 60_000
 
 type LoginStatus = 'pending' | 'code' | 'ok' | 'error' | 'cancelled'
+
+/** A login can be cancelled from another request while a callback is in flight. */
+function isLoginCancelled(state: LoginState): boolean {
+  return state.status === 'cancelled'
+}
 
 interface LoginState {
   id: string
@@ -91,8 +97,8 @@ function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerRes
     sendJson(res, 403, { ok: false, error: 'origin refused' })
     return true
   } catch {
-    // If origin is not a standard URL (e.g. Electron internal identifier), but connection is loopback
-    return false
+    sendJson(res, 403, { ok: false, error: 'origin refused' })
+    return true
   }
 }
 
@@ -238,6 +244,17 @@ export function registerHitchfinRoutes(
   }
 
   const logins = new Map<string, LoginState>()
+  const loginTimers = new Set<NodeJS.Timeout>()
+
+  const trackLogin = (state: LoginState): void => {
+    logins.set(state.id, state)
+    const timer = setTimeout(() => {
+      logins.delete(state.id)
+      loginTimers.delete(timer)
+    }, LOGIN_TTL_MS)
+    timer.unref?.()
+    loginTimers.add(timer)
+  }
 
   const modelsChanged = (descriptor: ChannelDescriptor): void => {
     adapter.invalidate(descriptor.providerId)
@@ -248,26 +265,43 @@ export function registerHitchfinRoutes(
     descriptor: ChannelDescriptor,
     accountId: string,
     auth: unknown,
+    proxy?: string,
   ): Promise<AccountPayload> {
-    let existing = await accounts.get(descriptor.id, accountId).catch(() => undefined)
+    const stored = await accounts.list(descriptor.id).catch(() => [])
+    let existing =
+      stored.find((entry) => entry.accountId === accountId) ??
+      (await accounts.get(descriptor.id, accountId).catch(() => undefined))
     if (!existing) {
       const identity = identityOf(auth)
       if (identity) {
-        const stored = await accounts.list(descriptor.id).catch(() => [])
         existing = stored.find((entry) => identityOf(entry.auth) === identity)
       }
     }
 
+    let inheritedFreeOnly = descriptor.freeOnlyDefault
+    let inheritedHiddenModels: string[] | undefined
+    if (!existing && stored.length > 0) {
+      inheritedFreeOnly = stored.every((entry) => entry.freeOnly !== false)
+      let intersection = [...(stored[0].hiddenModels ?? [])]
+      for (const peer of stored.slice(1)) {
+        const peerSet = new Set(peer.hiddenModels ?? [])
+        intersection = intersection.filter((id) => peerSet.has(id))
+      }
+      if (intersection.length > 0) inheritedHiddenModels = intersection
+    }
+
+    const resolvedProxy = proxy ?? existing?.proxy
+    const resolvedHiddenModels = existing?.hiddenModels ?? inheritedHiddenModels
     const now = Date.now()
     return accounts.save({
       channelId: descriptor.id,
       accountId: existing?.accountId ?? accountId,
       label: existing?.label ?? labelFromAuth(descriptor.displayName, auth),
       auth,
-      freeOnly: existing?.freeOnly ?? descriptor.freeOnlyDefault,
+      freeOnly: existing?.freeOnly ?? inheritedFreeOnly,
       ...(existing?.plan ? { plan: existing.plan } : {}),
-      ...(existing?.hiddenModels ? { hiddenModels: existing.hiddenModels } : {}),
-      ...(existing?.proxy ? { proxy: existing.proxy } : {}),
+      ...(resolvedHiddenModels ? { hiddenModels: resolvedHiddenModels } : {}),
+      ...(resolvedProxy ? { proxy: resolvedProxy } : {}),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     })
@@ -495,7 +529,7 @@ export function registerHitchfinRoutes(
           ...(proxy ? { proxy } : {}),
           createdAt: Date.now(),
         }
-        logins.set(state.id, state)
+        trackLogin(state)
         if (state.status === 'pending') {
           void completeLogin(state, descriptor, loadInfo)
         }
@@ -535,10 +569,20 @@ export function registerHitchfinRoutes(
         sendJson(res, 400, { ok: false, error: 'API key is required' })
         return
       }
+      const parsedProxy = parseProxy(body.proxy)
+      if (parsedProxy.error) {
+        sendJson(res, 400, { ok: false, error: parsedProxy.error })
+        return
+      }
       try {
         const accountId = await resolveAccountId(accounts, descriptor.id, body.accountId)
         const result = await worker.apiKey(loadInfo, accountId, methodIndex, key)
-        const account = await saveLoginAccount(descriptor, accountId, result.auth)
+        const account = await saveLoginAccount(
+          descriptor,
+          accountId,
+          result.auth,
+          parsedProxy.proxy,
+        )
         adapter.forget(descriptor.providerId, account.accountId)
         modelsChanged(descriptor)
         sendJson(res, 200, { ok: true, account: publicAccount(account) })
@@ -589,8 +633,10 @@ export function registerHitchfinRoutes(
         sendJson(res, 404, { ok: false, error: 'unknown login' })
         return
       }
-      worker.cancelAuth(state.workerSession)
-      state.status = 'cancelled'
+      if (state.status === 'pending' || state.status === 'code') {
+        worker.cancelAuth(state.workerSession)
+        state.status = 'cancelled'
+      }
       sendJson(res, 200, { ok: true, login: publicLogin(state) })
       return
     }
@@ -699,22 +745,32 @@ export function registerHitchfinRoutes(
     loadInfo: NonNullable<ReturnType<ChannelRegistry['loadInfo']>>,
     code?: string,
   ): Promise<void> {
+    if (isLoginCancelled(state)) return
     try {
       const result = await worker.callback(loadInfo, state.workerSession, code, state.proxy)
-      const account = await saveLoginAccount(descriptor, state.accountId, result.auth)
+      // The user may have cancelled while the upstream callback was in flight.
+      if (isLoginCancelled(state)) return
+      const account = await saveLoginAccount(
+        descriptor,
+        state.accountId,
+        result.auth,
+        state.proxy,
+      )
       adapter.forget(descriptor.providerId, account.accountId)
       modelsChanged(descriptor)
       state.accountId = account.accountId
       state.status = 'ok'
       state.account = account
     } catch (error) {
-      if (state.status === 'cancelled') return
+      if (isLoginCancelled(state)) return
       state.status = 'error'
       state.error = errorMessage(error)
     }
   }
 
   return () => {
+    for (const timer of loginTimers) clearTimeout(timer)
+    loginTimers.clear()
     logins.clear()
     if (typeof unregister === 'function') {
       try {

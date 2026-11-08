@@ -75,6 +75,7 @@ interface StreamState {
   headSettled: boolean
   queued: Uint8Array[]
   ended: boolean
+  cleanup?: () => void
 }
 
 export interface ChannelWorkerHostOptions {
@@ -162,13 +163,18 @@ export class ChannelWorkerHost {
     }
     worker.on('message', (message: unknown) => this.onMessage(message))
     worker.on('error', (error) => {
+      if (this.expectedExits.has(worker)) return
       reportCrash()
-      this.failAll(error)
+      if (this.worker === worker || this.worker === null) this.failAll(error)
     })
     worker.on('exit', (code) => {
-      if (this.worker === worker) this.worker = null
+      const wasCurrent = this.worker === worker
+      if (wasCurrent) this.worker = null
+      if (this.expectedExits.has(worker)) return
       reportCrash()
-      this.failAll(new Error(`channel worker exited with code ${code}`))
+      if (wasCurrent || this.worker === null) {
+        this.failAll(new Error(`channel worker exited with code ${code}`))
+      }
     })
     this.worker = worker
     return worker
@@ -212,6 +218,8 @@ export class ChannelWorkerHost {
             stream.queued = []
           },
           cancel: () => {
+            stream.cleanup?.()
+            this.streams.delete(id)
             this.send({ type: 'cancelFetch', id })
           },
         })
@@ -234,6 +242,7 @@ export class ChannelWorkerHost {
       }
       if (message.type === 'end') {
         stream.ended = true
+        stream.cleanup?.()
         try {
           stream.controller.close()
         } catch {
@@ -246,6 +255,7 @@ export class ChannelWorkerHost {
         return
       }
       if (message.type === 'error') {
+        stream.cleanup?.()
         this.streams.delete(id)
         const error = workerError(message.error)
         if (!stream.headSettled) {
@@ -384,21 +394,28 @@ export class ChannelWorkerHost {
     this.send({ type: 'cancelAuth', session })
     // Trae's browser sign-in opens a loopback callback server. Aborting its
     // signal is not enough to release that server, so recycle the worker once
-    // the cancel message has been delivered and no streams are actively using it.
+    // the cancel message has been delivered and no streams or RPC calls are active.
     const startedAt = Date.now()
-    setTimeout(() => {
+    const isIdle = () => this.streams.size === 0 && this.pending.size === 0
+    const timer = setTimeout(() => {
       if (this.disposed) return
-      if (this.streams.size === 0) {
+      if (isIdle()) {
         void this.restart()
         return
       }
       const check = setInterval(() => {
+        if (this.disposed) {
+          clearInterval(check)
+          return
+        }
         const timedOut = Date.now() - startedAt > CANCEL_AUTH_MAX_WAIT_MS
-        if (this.streams.size > 0 && !timedOut) return
+        if (!isIdle() && !timedOut) return
         clearInterval(check)
-        if (!this.disposed && this.streams.size === 0) void this.restart()
+        if (!this.disposed && isIdle()) void this.restart()
       }, 1000)
+      check.unref?.()
     }, 500)
+    timer.unref?.()
   }
 
   async restart(): Promise<void> {
@@ -433,6 +450,7 @@ export class ChannelWorkerHost {
       this.streams.set(id, state)
 
       const onAbort = () => {
+        state.cleanup?.()
         this.send({ type: 'cancelFetch', id })
         const error = new HitchfinError('request aborted', 'ABORTED')
         if (state.headSettled) {
@@ -451,7 +469,9 @@ export class ChannelWorkerHost {
           onAbort()
           return
         }
-        init.signal.addEventListener('abort', onAbort, { once: true })
+        const signal = init.signal
+        state.cleanup = () => signal.removeEventListener('abort', onAbort)
+        signal.addEventListener('abort', onAbort, { once: true })
       }
 
       try {
@@ -461,6 +481,7 @@ export class ChannelWorkerHost {
           channel: options.channel,
           accountId: options.accountId ?? '',
           auth: options.auth,
+          freeOnly: options.freeOnly ?? false,
           model: options.model ?? '',
           sessionId: options.sessionId ?? '',
           ...(options.proxy ? { proxy: options.proxy } : {}),
@@ -472,6 +493,7 @@ export class ChannelWorkerHost {
           },
         })
       } catch (error) {
+        state.cleanup?.()
         this.streams.delete(id)
         reject(
           error instanceof Error
@@ -486,16 +508,22 @@ export class ChannelWorkerHost {
     this.disposed = true
     const worker = this.worker
     this.worker = null
+    const stoppedError = new HitchfinError('channel worker stopped', 'WORKER_STOPPED')
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer)
-      pending.reject(new HitchfinError('channel worker stopped', 'WORKER_STOPPED'))
+      pending.reject(stoppedError)
     }
     this.pending.clear()
     for (const stream of this.streams.values()) {
-      try {
-        stream.controller.error(new HitchfinError('channel worker stopped', 'WORKER_STOPPED'))
-      } catch {
-        // already closed
+      stream.cleanup?.()
+      if (!stream.headSettled) {
+        stream.headReject(stoppedError)
+      } else {
+        try {
+          stream.controller.error(stoppedError)
+        } catch {
+          // already closed
+        }
       }
     }
     this.streams.clear()
@@ -512,7 +540,16 @@ export class ChannelWorkerHost {
     }
     this.pending.clear()
     for (const stream of this.streams.values()) {
-      if (!stream.headSettled) stream.headReject(error)
+      stream.cleanup?.()
+      if (!stream.headSettled) {
+        stream.headReject(error)
+      } else {
+        try {
+          stream.controller.error(error)
+        } catch {
+          // already errored
+        }
+      }
     }
     this.streams.clear()
   }

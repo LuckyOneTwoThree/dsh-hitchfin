@@ -134,19 +134,29 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
   private readonly sticky = new Map<string, string>()
   /** provider + model -> request/stream protocol, filled while listing models. */
   private readonly protocols = new Map<string, TransportProtocol>()
+  /** provider + model -> account ids that actually expose the model. */
+  private readonly modelAccounts = new Map<string, Set<string>>()
+  /** providers whose last model listing had a partial account failure. */
+  private readonly incompleteProviders = new Set<string>()
 
   constructor(private readonly options: HitchfinAdapterOptions) {}
 
   invalidate(provider?: string): void {
     if (provider) {
       this.cache.delete(provider)
+      this.incompleteProviders.delete(provider)
       const prefix = `${provider}\0`
       for (const key of this.protocols.keys()) {
         if (key.startsWith(prefix)) this.protocols.delete(key)
       }
+      for (const key of this.modelAccounts.keys()) {
+        if (key.startsWith(prefix)) this.modelAccounts.delete(key)
+      }
     } else {
       this.cache.clear()
+      this.incompleteProviders.clear()
       this.protocols.clear()
+      this.modelAccounts.clear()
     }
   }
 
@@ -236,7 +246,11 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
 
   private async protocolFor(provider: string, model: string): Promise<TransportProtocol> {
     const key = `${provider}\0${model}`
-    if (!this.protocols.has(key)) await this.listModels(provider)
+    const cached = this.cache.get(provider)
+    const expired = cached !== undefined && Date.now() - cached.at >= 30_000
+    if (!this.protocols.has(key) || expired || this.incompleteProviders.has(provider)) {
+      await this.listModels(provider)
+    }
     return this.protocols.get(key) ?? 'openai-completions'
   }
 
@@ -308,6 +322,8 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
             : []
 
       const byId = new Map<string, ModelRecord>()
+      const ownersByModel = new Map<string, Set<string>>()
+      let allAccountsListed = true
       for (const account of sources) {
         let models: readonly ChannelModelRecord[]
         try {
@@ -319,6 +335,7 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
             ...(account.proxy ? { proxy: account.proxy } : {}),
           })
         } catch (error) {
+          allAccountsListed = false
           this.options.logger.warn(
             `dsh-hitchfin: listing ${descriptor.displayName} models for ${account.accountId} failed: ${errorMessage(error)}`,
           )
@@ -342,10 +359,30 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
         }
         for (const model of usable) {
           if (hidden.has(model.id)) continue
+          if (account.auth !== undefined) {
+            let owners = ownersByModel.get(model.id)
+            if (!owners) {
+              owners = new Set()
+              ownersByModel.set(model.id, owners)
+            }
+            owners.add(account.accountId)
+          }
           const existing = byId.get(model.id)
           if (!existing || (model.freeKnown && model.free && !existing.free)) {
             byId.set(model.id, { ...model, accountId: account.accountId })
           }
+        }
+      }
+
+      const ownerPrefix = `${provider}\0`
+      for (const key of this.modelAccounts.keys()) {
+        if (key.startsWith(ownerPrefix)) this.modelAccounts.delete(key)
+      }
+      // A failed account listing would make the ownership index incomplete, so
+      // fall back to unrestricted routing instead of excluding a valid account.
+      if (allAccountsListed && accounts.length > 0) {
+        for (const [id, owners] of ownersByModel) {
+          this.modelAccounts.set(`${ownerPrefix}${id}`, owners)
         }
       }
 
@@ -356,7 +393,13 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       const models = dedupeModels([...byId.values()]).map((record) =>
         modelInfo(descriptor, record),
       )
-      this.cache.set(provider, { at: Date.now(), models })
+      if (allAccountsListed) {
+        this.incompleteProviders.delete(provider)
+        this.cache.set(provider, { at: Date.now(), models })
+      } else {
+        this.incompleteProviders.add(provider)
+        this.cache.delete(provider)
+      }
       return models
     } catch (error) {
       this.options.logger.warn(
@@ -473,11 +516,28 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       return
     }
 
+    const protocol = await this.protocolFor(options.provider, options.model)
+    const owners = this.modelAccounts.get(`${options.provider}\0${options.model}`)
+    const capable = signedIn.filter((entry) => owners === undefined || owners.has(entry.accountId))
+    if (capable.length === 0) {
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: {
+            message: `${descriptor.displayName}: no signed-in account offers model ${options.model}`,
+            code: 'MODEL_NOT_FOUND',
+          },
+        },
+      }
+      return
+    }
+
     const now = Date.now()
     const stickyId = this.sticky.get(
       conversationKey(options.provider, options.model, options.sessionId),
     )
-    const eligible = signedIn
+    const eligible = capable
       .filter(
         (entry) =>
           this.cooldownFor(options.provider, entry.accountId, options.model, now) === undefined,
@@ -492,13 +552,11 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
         type: 'finish',
         reason: {
           kind: 'error',
-          failure: this.coolingFailure(descriptor, options.provider, signedIn, options.model),
+          failure: this.coolingFailure(descriptor, options.provider, capable, options.model),
         },
       }
       return
     }
-
-    const protocol = await this.protocolFor(options.provider, options.model)
 
     let lastFailure: LlmFailure | undefined
     for (const account of eligible) {

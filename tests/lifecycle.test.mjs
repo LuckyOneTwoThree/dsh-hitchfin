@@ -180,3 +180,27 @@ test('a stopped host rejects fetch calls without leaking a pending stream', asyn
     },
   )
 })
+
+test('a worker crash after response headers errors the active ReadableStream instead of hanging', async () => {
+  const host = new ChannelWorkerHost({ workerPath: auditWorker })
+  try {
+    const response = await host.fetch(
+      'http://hitchfin.local/v1/chat/completions',
+      { method: 'POST', body: '{}' },
+      { channel, model: 'crash-mid-stream' },
+    )
+    assert.equal(response.status, 200)
+    const reader = response.body.getReader()
+    const first = await reader.read()
+    assert.equal(first.done, false)
+    await assert.rejects(
+      () => reader.read(),
+      (error) => {
+        assert.match(error.message, /exited with code 1/)
+        return true
+      },
+    )
+  } finally {
+    await host.stop()
+  }
+})
