@@ -1000,14 +1000,12 @@ function shortName(name: string): string {
 function methodHint(method: Method): string {
   if (method.kind === 'pat') return T('使用个人访问令牌', 'Use a personal access token')
   if (method.kind === 'api-key') return T('粘贴官方 API Key', 'Paste an official API key')
-  if (method.id === 'desktop') return T('读取本机桌面登录', 'Use the desktop app session')
   return T('在浏览器中完成授权', 'Authorize in your browser')
 }
 
 function methodLabel(method: Method): string {
   if (method.kind === 'api-key') return 'API Key'
   if (method.kind === 'pat') return 'PAT'
-  if (method.id === 'desktop') return T('桌面登录', 'Desktop app')
   return T('浏览器登录', 'Browser')
 }
 

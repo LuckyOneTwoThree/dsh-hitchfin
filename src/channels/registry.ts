@@ -43,9 +43,12 @@ export const WORKBUDDY: ChannelDescriptor = {
   displayName: 'WorkBuddy CN',
   status: 'stable',
   protocols: ['openai-completions', 'anthropic-messages'],
+  // Indexes mirror the channel package's auth.methods (0 browser, 1 desktop,
+  // 2 api). The desktop entry is not exposed: WorkBuddy 5.6+ seals its local
+  // tokens and the package refuses to read them. Keep index 2 for the API key
+  // so it still maps to the package's third method.
   authMethods: [
     { id: 'browser', label: '浏览器登录', kind: 'browser', index: 0 },
-    { id: 'desktop', label: '使用 WorkBuddy 桌面登录', kind: 'browser', index: 1 },
     {
       id: 'api-key',
       label: 'WorkBuddy API Key',
