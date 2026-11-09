@@ -101,7 +101,7 @@ After installation, open **Settings → 订阅接入**.
 
 | Channel | Status | Sign-in | Free/paid metadata | Verification |
 | --- | --- | --- | --- | --- |
-| WorkBuddy CN | Stable | Browser, desktop app, API Key | Yes | Live model catalog and a real free-model chat request verified |
+| WorkBuddy CN | Stable | Browser, API Key | Yes | Live model catalog and a real free-model chat request verified |
 | Qoder CN | Stable | Browser, PAT | Yes | Login flow verified; live chat validation is on the roadmap |
 | Trae CN | Experimental | Browser | No — all models are shown | Login flow verified; live catalog deduplicated from 90 internal IDs to 68 display models |
 
