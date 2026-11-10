@@ -97,6 +97,31 @@ test('a stopped host rejects further calls with WORKER_STOPPED', async () => {
   )
 })
 
+test('a session from a recycled worker cannot drive the new worker', async () => {
+  const host = new ChannelWorkerHost({ workerPath: authWorker })
+  try {
+    const started = await host.authorize(channel, 'acct-1', 0)
+    assert.match(started.session, /^\d+:/)
+
+    await host.restart()
+
+    // The old id must be refused locally instead of reaching the new worker,
+    // whose own session counter restarted at 1.
+    await assert.rejects(
+      () => host.callback(channel, started.session),
+      (error) => {
+        assert.equal(error.code, 'ABORTED')
+        return true
+      },
+    )
+
+    const next = await host.authorize(channel, 'acct-1', 0)
+    assert.notEqual(next.session.split(':')[0], started.session.split(':')[0])
+  } finally {
+    await host.stop()
+  }
+})
+
 test('package loads emit a redacted-path audit event', async () => {
   const audits = []
   const host = new ChannelWorkerHost({

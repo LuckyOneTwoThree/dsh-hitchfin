@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { HitchfinAdapter } from '../lib/adapter/hitchfin-adapter.js'
+import { HitchfinError } from '../lib/errors.js'
 
 const descriptor = {
   id: 'workbuddy-cn',
@@ -222,4 +223,96 @@ test('ownership index recovers automatically after a transient account listing f
   await collect(adapter.stream(generateOptions('kimi-k3-1')))
   assert.equal(calls.length, 1)
   assert.equal(calls[0].accountId, 'acct-2')
+})
+
+test('an empty 200 stream cools the account and fails over once', async () => {
+  const empty = () =>
+    new Response(new ReadableStream({ start: (controller) => controller.close() }), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    })
+  const { adapter, calls } = harness(
+    [
+      { accountId: 'acct-1', models: [model('glm-5.3')] },
+      { accountId: 'acct-2', models: [model('glm-5.3')] },
+    ],
+    (accountId) => (accountId === 'acct-1' ? empty() : openAiStream()),
+  )
+
+  const first = await collect(adapter.stream(generateOptions('glm-5.3')))
+  assert.equal(first.at(-1).type, 'finish')
+  assert.equal(calls.map((call) => call.accountId).join(','), 'acct-1,acct-2')
+
+  // A fresh session must start on acct-2: acct-1 is cooling from EMPTY_RESPONSE.
+  const second = await collect(
+    adapter.stream({ ...generateOptions('glm-5.3'), sessionId: 'session-2' }),
+  )
+  assert.equal(second.at(-1).type, 'finish')
+  assert.equal(calls.at(-1).accountId, 'acct-2')
+  assert.equal(calls.length, 3)
+})
+
+test('an unlisted failure code still cools the account', async () => {
+  const { adapter, calls } = harness(
+    [{ accountId: 'acct-1', models: [model('glm-5.3')] }],
+    () => {
+      throw new HitchfinError('weird upstream failure', 'SOMETHING_NEW')
+    },
+  )
+
+  const first = await collect(adapter.stream(generateOptions('glm-5.3')))
+  assert.equal(first.at(-1).reason.failure.code, 'SOMETHING_NEW')
+
+  const second = await collect(adapter.stream(generateOptions('glm-5.3')))
+  assert.match(second.at(-1).reason.failure.message, /cooling down/)
+  assert.equal(calls.length, 1)
+})
+
+test('Retry-After extends a non-429 cooldown', async () => {
+  const { adapter } = harness(
+    [{ accountId: 'acct-1', models: [model('glm-5.3')] }],
+    () => new Response('busy', { status: 503, headers: { 'retry-after': '120' } }),
+  )
+
+  await collect(adapter.stream(generateOptions('glm-5.3')))
+  const second = await collect(adapter.stream(generateOptions('glm-5.3')))
+  // The provider asked for 120s; the default SERVER cooldown is 60s.
+  assert.match(second.at(-1).reason.failure.message, /retry in 1[12]\ds/)
+})
+
+test('408 fails over instead of short-circuiting as an invalid request', async () => {
+  const { adapter, calls } = harness(
+    [
+      { accountId: 'acct-1', models: [model('glm-5.3')] },
+      { accountId: 'acct-2', models: [model('glm-5.3')] },
+    ],
+    (accountId) =>
+      accountId === 'acct-1' ? new Response('timeout', { status: 408 }) : openAiStream(),
+  )
+
+  const chunks = await collect(adapter.stream(generateOptions('glm-5.3')))
+  assert.equal(calls.length, 2)
+  assert.equal(chunks.at(-1).type, 'finish')
+  assert.notEqual(chunks.at(-1).reason.kind, 'error')
+})
+
+test('a stopped worker does not put the account into cooldown', async () => {
+  let stopped = true
+  const { adapter, calls } = harness(
+    [{ accountId: 'acct-1', models: [model('glm-5.3')] }],
+    () => {
+      if (stopped) throw new HitchfinError('worker stopped', 'WORKER_STOPPED')
+      return openAiStream()
+    },
+  )
+
+  const first = await collect(adapter.stream(generateOptions('glm-5.3')))
+  assert.equal(first.at(-1).reason.failure.code, 'WORKER_STOPPED')
+
+  stopped = false
+  const second = await collect(
+    adapter.stream({ ...generateOptions('glm-5.3'), sessionId: 'session-2' }),
+  )
+  assert.equal(second.at(-1).type, 'finish')
+  assert.equal(calls.length, 2)
 })

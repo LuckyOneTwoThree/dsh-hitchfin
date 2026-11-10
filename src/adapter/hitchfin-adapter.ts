@@ -66,8 +66,22 @@ const COOLDOWN_MS: Readonly<Record<string, number>> = {
   SERVER: 60_000,
   TRANSPORT: 30_000,
   TIMEOUT: 60_000,
+  EMPTY_RESPONSE: 30_000,
+  CHANNEL_ERROR: 60_000,
+  // A broken proxy fails every request the same way; back off long enough that
+  // the account does not keep hammering it while the operator fixes the URL.
+  PROXY: 5 * 60_000,
   MODEL_NOT_FOUND: 30 * 60_000,
 }
+
+/**
+ * Failures that no other account can fix, or that carry their own recovery:
+ * cooling them would keep a healthy account out of rotation for no reason.
+ */
+const NO_COOLDOWN = new Set(['ABORTED', 'WORKER_STOPPED', 'INVALID_REQUEST', 'UNSUPPORTED_CONTENT'])
+
+/** An unlisted code still means "this account just failed": cool it briefly. */
+const DEFAULT_COOLDOWN_MS = 60_000
 
 const MODEL_SCOPED_COOLDOWN = new Set(['MODEL_NOT_FOUND'])
 
@@ -150,7 +164,10 @@ function failureOf(error: unknown, signal?: AbortSignal): LlmFailure {
         : {}),
     }
   }
-  return { message: errorMessage(error), code: 'SERVER' }
+  // Anything that is not a HitchfinError came from the transport layer (a
+  // reset socket, a worker crash, a DNS failure), so treat it as TRANSPORT
+  // rather than the longer SERVER cooldown.
+  return { message: errorMessage(error), code: 'TRANSPORT' }
 }
 
 /**
@@ -279,8 +296,8 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
     model: string,
     failure: LlmFailure,
   ): void {
-    const base = COOLDOWN_MS[failure.code]
-    if (base === undefined) return
+    if (NO_COOLDOWN.has(failure.code)) return
+    const base = COOLDOWN_MS[failure.code] ?? DEFAULT_COOLDOWN_MS
     const now = Date.now()
     const duration = Math.max(base, failure.providerRetryAfterMs ?? 0)
     const key = MODEL_SCOPED_COOLDOWN.has(failure.code)

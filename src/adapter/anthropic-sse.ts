@@ -291,7 +291,8 @@ export function createAnthropicSseTransport(
     if (!response.ok) {
       const error = failureForStatus(response.status, await responseDetail(response))
       const retryAfter = parseRetryAfterMs(response.headers.get('retry-after'))
-      if (retryAfter !== undefined && error.code === 'RATE_LIMIT') {
+      // The provider's wait applies to whatever it just rejected, not only 429.
+      if (retryAfter !== undefined) {
         throw new HitchfinError(error.message, error.code, {
           status: error.status,
           providerRetryAfterMs: retryAfter,
@@ -357,14 +358,16 @@ export function createAnthropicSseTransport(
       }
     }
 
-    const processEvent = function* (payload: string): Generator<StreamChunk, void, unknown> {
+    const processEvent = function* (payload: string): Generator<StreamChunk, boolean, unknown> {
       const trimmed = payload.trim()
-      if (!trimmed || trimmed === '[DONE]') return
+      if (!trimmed) return false
+      // message_stop is the protocol's own terminator; [DONE] is accepted too.
+      if (trimmed === '[DONE]') return true
       let event: AnthropicEvent
       try {
         event = JSON.parse(trimmed) as AnthropicEvent
       } catch {
-        return
+        return false
       }
 
       switch (event.type) {
@@ -375,7 +378,7 @@ export function createAnthropicSseTransport(
             cacheReadTokens = usage.cache_read_input_tokens ?? cacheReadTokens
             cacheWriteTokens = usage.cache_creation_input_tokens ?? cacheWriteTokens
           }
-          return
+          return false
         }
         case 'content_block_start': {
           const index = event.index ?? 0
@@ -418,12 +421,12 @@ export function createAnthropicSseTransport(
               }
             }
           }
-          return
+          return false
         }
         case 'content_block_delta': {
           const index = event.index ?? 0
           const state = blocks.get(index)
-          if (!state) return
+          if (!state) return false
           const delta = event.delta
           const text = delta?.text ?? ''
           const thinking = delta?.thinking ?? ''
@@ -444,21 +447,21 @@ export function createAnthropicSseTransport(
               argumentsDelta: partialJson,
             }
           }
-          return
+          return false
         }
         case 'content_block_stop': {
           yield* closeBlock(event.index ?? 0)
-          return
+          return false
         }
         case 'message_delta': {
           if (event.usage?.output_tokens !== undefined) outputTokens = event.usage.output_tokens
           const stopReason = event.delta?.stop_reason
           if (stopReason === 'max_tokens') finishReasonKind = 'max-tokens'
           else if (stopReason === 'tool_use') finishReasonKind = 'tool-calls'
-          return
+          return false
         }
         case 'message_stop':
-          return
+          return true
         case 'error': {
           const code = errorCodeFor(event.error?.type)
           throw new HitchfinError(
@@ -467,7 +470,7 @@ export function createAnthropicSseTransport(
           )
         }
         default:
-          return
+          return false
       }
     }
 
@@ -475,7 +478,9 @@ export function createAnthropicSseTransport(
     const decoder = new TextDecoder()
     let buffer = ''
     try {
-      while (true) {
+      // message_stop ends the turn on its own: waiting for TCP EOF hangs the
+      // request whenever the vendor keeps the connection open.
+      readLoop: while (true) {
         const { done, value } = await reader.read()
         if (done) break
         buffer += decoder.decode(value, { stream: true })
@@ -483,7 +488,9 @@ export function createAnthropicSseTransport(
         while (newlineIdx !== -1) {
           const rawLine = buffer.slice(0, newlineIdx).replace(/\r$/, '')
           buffer = buffer.slice(newlineIdx + 1)
-          if (rawLine.startsWith('data:')) yield* processEvent(rawLine.slice(5))
+          if (rawLine.startsWith('data:')) {
+            if (yield* processEvent(rawLine.slice(5))) break readLoop
+          }
           newlineIdx = buffer.indexOf('\n')
         }
       }

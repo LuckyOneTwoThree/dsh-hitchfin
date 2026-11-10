@@ -80,6 +80,8 @@ interface StreamState {
   headReject: (error: Error) => void
   headSettled: boolean
   queued: Uint8Array[]
+  /** Bytes queued before the response head arrived. */
+  queuedBytes: number
   ended: boolean
   cleanup?: () => void
   idleTimer?: NodeJS.Timeout
@@ -101,6 +103,12 @@ const CIRCUIT_MS = 30_000
 const AUTH_CALL_TIMEOUT_MS = 15 * 60_000
 /** A stalled vendor connection must not hold a turn open forever. */
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000
+/**
+ * Cap on bytes a single response may queue ahead of its consumer. The worker
+ * pushes chunks without waiting for an ack; a slow consumer would otherwise
+ * grow both queues without bound.
+ */
+const MAX_STREAM_BUFFER_BYTES = 8 * 1024 * 1024
 
 function bytesFromBase64(data: string): Uint8Array {
   return Uint8Array.from(Buffer.from(data, 'base64'))
@@ -145,6 +153,13 @@ export class ChannelWorkerHost {
   private disposed = false
   /** Set when a cancelled auth could not recycle immediately because work was live. */
   private recycleAfterIdle = false
+  /**
+   * Bumped for every worker we spawn. Auth sessions carry the generation that
+   * issued them: a recycled worker restarts its own session counter at 1, so an
+   * old id could otherwise match a brand-new sign-in and hand its credentials
+   * to the wrong account.
+   */
+  private workerGeneration = 0
 
   constructor(private readonly options: ChannelWorkerHostOptions = {}) {
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 30_000
@@ -171,6 +186,7 @@ export class ChannelWorkerHost {
       throw new HitchfinError(`channel worker keeps failing; retry in ${seconds}s`, 'SERVER')
     }
     if (this.worker) return this.worker
+    this.workerGeneration += 1
     const workerPath = this.options.workerPath ?? new URL('../../worker/index.mjs', import.meta.url)
     const worker = new Worker(workerPath)
     let crashReported = false
@@ -203,11 +219,47 @@ export class ChannelWorkerHost {
       this.routeMessage(raw)
     } catch (error) {
       // A malformed worker message must not become an uncaught exception in
-      // the DSH host; surface it to every waiting caller instead.
-      this.failAll(error instanceof Error ? error : new Error(errorMessage(error)))
+      // the DSH host. Fail only the call it belongs to: aborting every
+      // concurrent chat and sign-in over one bad message is worse than losing
+      // that one call.
+      const failure = error instanceof Error ? error : new Error(errorMessage(error))
+      const id = raw && typeof raw === 'object' ? (raw as Record<string, unknown>).id : undefined
+      if (typeof id === 'number' && this.failCall(id, failure)) return
+      this.failAll(failure)
     } finally {
       this.maybeRecycle()
     }
+  }
+
+  /** Fail one pending call or stream; false when the id is unknown. */
+  private failCall(id: number, error: Error): boolean {
+    const pending = this.pending.get(id)
+    if (pending) {
+      clearTimeout(pending.timer)
+      this.pending.delete(id)
+      pending.reject(error)
+      return true
+    }
+    const stream = this.streams.get(id)
+    if (!stream) return false
+    this.streams.delete(id)
+    stream.cleanup?.()
+    this.clearStreamIdle(stream)
+    if (stream.headSettled) {
+      try {
+        stream.controller.error(error)
+      } catch {
+        // Already closed.
+      }
+    } else {
+      stream.headReject(error)
+    }
+    try {
+      this.send({ type: 'cancelFetch', id })
+    } catch {
+      // The worker is already gone.
+    }
+    return true
   }
 
   private routeMessage(raw: unknown): void {
@@ -247,6 +299,7 @@ export class ChannelWorkerHost {
             stream.controller = controller
             for (const chunk of stream.queued) controller.enqueue(chunk)
             stream.queued = []
+            stream.queuedBytes = 0
           },
           cancel: () => {
             stream.cleanup?.()
@@ -259,6 +312,9 @@ export class ChannelWorkerHost {
             }
             this.maybeRecycle()
           },
+        }, {
+          highWaterMark: MAX_STREAM_BUFFER_BYTES,
+          size: (chunk: Uint8Array) => chunk.byteLength,
         })
         // 204/205/304 forbid a body; the Response constructor throws otherwise.
         const responseBody = status === 204 || status === 205 || status === 304 ? null : body
@@ -271,9 +327,18 @@ export class ChannelWorkerHost {
         this.armStreamIdle(id, stream)
         if (!stream.headSettled) {
           stream.queued.push(data)
+          stream.queuedBytes += data.byteLength
+          if (stream.queuedBytes > MAX_STREAM_BUFFER_BYTES) {
+            this.overflowStream(id, stream)
+          }
         } else {
           try {
             stream.controller.enqueue(data)
+            // A negative desiredSize means the consumer is further behind than
+            // the queue budget; stop the stream instead of buffering forever.
+            if ((stream.controller.desiredSize ?? 0) < 0) {
+              this.overflowStream(id, stream)
+            }
           } catch {
             // The reader is gone; drop the chunk.
           }
@@ -399,6 +464,20 @@ export class ChannelWorkerHost {
     return result.usage ?? {}
   }
 
+  /** Tag a worker session with the generation that issued it. */
+  private scopeSession(session: string): string {
+    return `${this.workerGeneration}:${session}`
+  }
+
+  /** The worker-side id, or undefined when that generation is gone. */
+  private rawSession(session: string): string | undefined {
+    const separator = session.indexOf(':')
+    if (separator <= 0) return undefined
+    const generation = Number(session.slice(0, separator))
+    if (!Number.isInteger(generation) || generation !== this.workerGeneration) return undefined
+    return session.slice(separator + 1)
+  }
+
   async authorize(
     channel: ChannelLoadInfo,
     accountId: string,
@@ -406,11 +485,12 @@ export class ChannelWorkerHost {
     inputs: Record<string, string> = {},
     proxy?: string,
   ): Promise<ChannelAuthStart> {
-    return this.call(
+    const started = await this.call<ChannelAuthStart>(
       'authorize',
       { channel, accountId, method, inputs, ...(proxy ? { proxy } : {}) },
       60_000,
     )
+    return { ...started, session: this.scopeSession(started.session) }
   }
 
   async apiKey(
@@ -433,31 +513,38 @@ export class ChannelWorkerHost {
     code?: string,
     proxy?: string,
   ): Promise<ChannelAuthResult> {
+    const workerSession = this.rawSession(session)
+    if (workerSession === undefined) {
+      throw new HitchfinError('sign-in session expired; start the sign-in again', 'ABORTED')
+    }
     let callId: number | undefined
     try {
       return await this.call(
         'callback',
-        { channel, session, code: code ?? '', ...(proxy ? { proxy } : {}) },
+        { channel, session: workerSession, code: code ?? '', ...(proxy ? { proxy } : {}) },
         AUTH_CALL_TIMEOUT_MS,
         (id) => {
           callId = id
-          this.authCallIds.set(session, id)
+          this.authCallIds.set(workerSession, id)
         },
       )
     } finally {
-      if (callId !== undefined && this.authCallIds.get(session) === callId) {
-        this.authCallIds.delete(session)
+      if (callId !== undefined && this.authCallIds.get(workerSession) === callId) {
+        this.authCallIds.delete(workerSession)
       }
     }
   }
 
   cancelAuth(session: string): void {
+    const workerSession = this.rawSession(session)
+    // A session from a worker we already recycled has nothing left to cancel.
+    if (workerSession === undefined) return
     // Fail the pending callback now. Waiting for its fifteen-minute RPC
     // timeout is what kept a cancelled sign-in (and Trae's loopback server)
     // alive long after the user gave up.
-    const callId = this.authCallIds.get(session)
+    const callId = this.authCallIds.get(workerSession)
     if (callId !== undefined) {
-      this.authCallIds.delete(session)
+      this.authCallIds.delete(workerSession)
       const pending = this.pending.get(callId)
       if (pending) {
         clearTimeout(pending.timer)
@@ -466,7 +553,7 @@ export class ChannelWorkerHost {
       }
     }
     try {
-      this.send({ type: 'cancelAuth', session })
+      this.send({ type: 'cancelAuth', session: workerSession })
     } catch {
       // The worker is already gone; there is nothing left to cancel.
     }
@@ -533,8 +620,39 @@ export class ChannelWorkerHost {
     this.maybeRecycle()
   }
 
+  /** Stop a stream whose consumer fell more than the buffer budget behind. */
+  private overflowStream(id: number, stream: StreamState): void {
+    if (this.streams.get(id) !== stream) return
+    this.streams.delete(id)
+    stream.cleanup?.()
+    this.clearStreamIdle(stream)
+    try {
+      this.send({ type: 'cancelFetch', id })
+    } catch {
+      // The worker is already gone.
+    }
+    const error = new HitchfinError(
+      `channel stream exceeded ${MAX_STREAM_BUFFER_BYTES} bytes of buffering`,
+      'CHANNEL_ERROR',
+    )
+    if (stream.headSettled) {
+      try {
+        stream.controller.error(error)
+      } catch {
+        // Already closed.
+      }
+    } else {
+      stream.headReject(error)
+    }
+    this.maybeRecycle()
+  }
+
   async restart(): Promise<void> {
     this.recycleAfterIdle = false
+    // Any sign-in issued by the outgoing worker is dead from here on, even
+    // before its replacement exists.
+    this.workerGeneration += 1
+    this.authCallIds.clear()
     const worker = this.worker
     this.worker = null
     if (worker) {
@@ -561,6 +679,7 @@ export class ChannelWorkerHost {
         headReject: reject,
         headSettled: false,
         queued: [],
+        queuedBytes: 0,
         ended: false,
       }
       this.streams.set(id, state)

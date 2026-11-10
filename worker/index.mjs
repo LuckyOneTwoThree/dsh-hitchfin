@@ -46,6 +46,8 @@ function normalizeProxy(value) {
   return url.toString()
 }
 
+const MAX_PROXY_AGENTS = 8
+
 async function dispatcherFor(proxy) {
   const normalized = normalizeProxy(proxy)
   if (!normalized) return undefined
@@ -57,6 +59,15 @@ async function dispatcherFor(proxy) {
   }
   const agent = new module.ProxyAgent(normalized)
   proxyAgents.set(normalized, agent)
+  if (proxyAgents.size > MAX_PROXY_AGENTS) {
+    const oldest = proxyAgents.keys().next().value
+    if (oldest !== undefined && oldest !== normalized) {
+      const stale = proxyAgents.get(oldest)
+      proxyAgents.delete(oldest)
+      // A ProxyAgent owns a socket pool; dropping the reference alone leaks it.
+      Promise.resolve(stale?.close?.()).catch(() => {})
+    }
+  }
   return agent
 }
 
@@ -485,10 +496,12 @@ async function handleFetch(message) {
   }
 
   const controller = new AbortController()
-  streams.set(message.id, controller)
-  const dispatcher = await dispatcherFor(message.proxy)
 
   try {
+    // Register inside the try: a proxy or import failure must not leave a dead
+    // controller in `streams` for the rest of the worker's life.
+    streams.set(message.id, controller)
+    const dispatcher = await dispatcherFor(message.proxy)
     await scope.run(
       {
         channelId: message.channel.channelId,

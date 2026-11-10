@@ -675,3 +675,107 @@ test('adapter keeps chat completions for a non-Claude model on the same channel'
   assert.equal(calls[0].body.stream, true)
   assert.equal(chunks.at(-1).type, 'finish')
 })
+
+function streamWithoutClose(lines) {
+  const body = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder()
+      for (const line of lines) controller.enqueue(encoder.encode(line))
+      // Deliberately no close(): the protocol terminator must end the turn.
+    },
+  })
+  return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+}
+
+function withDeadline(promise, ms, label) {
+  let timer
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out: ${label}`)), ms)
+    timer.unref?.()
+  })
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
+}
+
+test('OpenAI stream ends at [DONE] without waiting for the socket to close', async () => {
+  const transport = createOpenAiSseTransport(
+    fetchWith(
+      streamWithoutClose([
+        oai({ choices: [{ delta: { content: 'hi' } }] }),
+        oai('[DONE]'),
+      ]),
+    ),
+  )
+  const chunks = await withDeadline(
+    collect(transport(params())),
+    2_000,
+    'OpenAI [DONE] terminator',
+  )
+  assert.equal(chunks.at(-1).type, 'finish')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
+
+test('Messages stream ends at message_stop without waiting for the socket to close', async () => {
+  const transport = createAnthropicSseTransport(
+    fetchWith(
+      streamWithoutClose([
+        ev('message_start', {
+          type: 'message_start',
+          message: { usage: { input_tokens: 1 } },
+        }),
+        ev('content_block_start', {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        }),
+        ev('content_block_delta', {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'hi' },
+        }),
+        ev('content_block_stop', { type: 'content_block_stop', index: 0 }),
+        ev('message_delta', {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn' },
+          usage: { output_tokens: 1 },
+        }),
+        ev('message_stop', { type: 'message_stop' }),
+      ]),
+    ),
+  )
+  const chunks = await withDeadline(
+    collect(transport(params())),
+    2_000,
+    'Messages message_stop terminator',
+  )
+  assert.equal(chunks.at(-1).type, 'finish')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
+
+test('a trailing rate-limit error after content is still reported', async () => {
+  const transport = createOpenAiSseTransport(
+    fetchWith(
+      responseFrom([
+        oai({ choices: [{ delta: { content: 'partial answer' } }] }),
+        oai({ error: { message: 'rate limited', code: 429 } }),
+      ]),
+    ),
+  )
+  await assert.rejects(
+    collect(transport(params())),
+    (error) => error.code === 'RATE_LIMIT',
+  )
+})
+
+test('a generic trailing error object still lets streamed content finish', async () => {
+  const transport = createOpenAiSseTransport(
+    fetchWith(
+      responseFrom([
+        oai({ choices: [{ delta: { content: 'answer' }, finish_reason: 'stop' }] }),
+        oai({ error: { message: 'vendor closed the turn' } }),
+      ]),
+    ),
+  )
+  const chunks = await collect(transport(params()))
+  assert.equal(chunks.at(-1).type, 'finish')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})

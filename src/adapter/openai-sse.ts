@@ -199,6 +199,14 @@ export function failureForStatus(status: number, detail: string): HitchfinError 
   if (status === 429) {
     return new HitchfinError(`channel rate limit (429)${detail}`, 'RATE_LIMIT', { status })
   }
+  // 408 is a timeout, not a malformed request: another account may well succeed.
+  if (status === 408) {
+    return new HitchfinError(`channel request timed out (408)${detail}`, 'TIMEOUT', { status })
+  }
+  // 425 and other retryable 4xx must fail over instead of short-circuiting.
+  if (status === 409 || status === 425) {
+    return new HitchfinError(`channel is not ready (${status})${detail}`, 'SERVER', { status })
+  }
   if (status >= 500) {
     return new HitchfinError(`channel server error (${status})${detail}`, 'SERVER', { status })
   }
@@ -273,7 +281,8 @@ export function createOpenAiSseTransport(
       }
       const error = failureForStatus(response.status, detail)
       const retryAfter = parseRetryAfterMs(response.headers.get('retry-after'))
-      if (retryAfter !== undefined && error.code === 'RATE_LIMIT') {
+      // The provider's wait applies to whatever it just rejected, not only 429.
+      if (retryAfter !== undefined) {
         throw new HitchfinError(error.message, error.code, {
           status: error.status,
           providerRetryAfterMs: retryAfter,
@@ -352,21 +361,33 @@ export function createOpenAiSseTransport(
         return false
       }
 
-      // A vendor that closes an otherwise healthy stream with a trailing error
+      // A vendor that closes an otherwise healthy stream with a generic error
       // object (Trae does) must not turn already-streamed content into a
-      // failure; an error before any content is a real failure.
-      if (parsed.error !== undefined && parsed.error !== null && !sawVisible) {
+      // failure. An account-scoped failure still must be reported: otherwise a
+      // throttled or exhausted account is recorded as a success and never cools
+      // down.
+      if (parsed.error !== undefined && parsed.error !== null) {
         const message =
           typeof parsed.error === 'string'
             ? parsed.error
             : typeof parsed.error.message === 'string'
               ? parsed.error.message
               : 'unknown error'
-        const status =
+        const explicitStatus =
           typeof parsed.error === 'object' && typeof parsed.error.code === 'number'
             ? parsed.error.code
-            : 500
-        throw failureForStatus(status, `: ${message}`)
+            : undefined
+        const failure =
+          explicitStatus !== undefined
+            ? failureForStatus(explicitStatus, `: ${message}`)
+            : new HitchfinError(`channel stream error: ${message}`, 'CHANNEL_ERROR')
+        const accountScoped =
+          explicitStatus !== undefined &&
+          (failure.code === 'AUTH' ||
+            failure.code === 'QUOTA' ||
+            failure.code === 'RATE_LIMIT' ||
+            failure.code === 'SERVER')
+        if (!sawVisible || accountScoped) throw failure
       }
 
       if (parsed.usage) {
@@ -481,7 +502,9 @@ export function createOpenAiSseTransport(
     let buffer = ''
 
     try {
-      while (true) {
+      // [DONE] terminates the turn on its own: waiting for TCP EOF hangs the
+      // request whenever the vendor keeps the connection open.
+      readLoop: while (true) {
         const { done, value } = await reader.read()
         if (done) break
         buffer += decoder.decode(value, { stream: true })
@@ -494,7 +517,7 @@ export function createOpenAiSseTransport(
             const isDone = yield* processSseDataLine(rawLine.slice(5))
             if (isDone) {
               buffer = ''
-              break
+              break readLoop
             }
           }
           newlineIdx = buffer.indexOf('\n')
