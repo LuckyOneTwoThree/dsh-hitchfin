@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { errorMessage } from './errors.js'
 import { canonicalHiddenNames, dedupeModels, selectVisibleModels } from './models.js'
 import {
+  accountIdentity,
   isValidAccountId,
   labelFromAuth,
   sortAccountsByPriority,
@@ -135,13 +136,21 @@ function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerRes
   }
 }
 
+/** A malformed request from the settings page, reported as 400 rather than 500. */
+class BadRequestError extends Error {}
+
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const header = req.headers['content-type']
+  const contentType = typeof header === 'string' ? header : ''
+  // A sandboxed page or an HTML form can only send text/plain without a CORS
+  // preflight, so it is the one content type a settings write must refuse.
+  if (contentType.startsWith('text/plain')) throw new BadRequestError('unsupported content type')
   let size = 0
   const chunks: Buffer[] = []
   for await (const chunk of req) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += buffer.length
-    if (size > BODY_LIMIT) throw new Error('request body too large')
+    if (size > BODY_LIMIT) throw new BadRequestError('request body too large')
     chunks.push(buffer)
   }
   if (chunks.length === 0) return {}
@@ -149,13 +158,24 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   if (!text.trim()) return {}
   const parsed = JSON.parse(text) as unknown
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('request body must be an object')
+    throw new BadRequestError('request body must be an object')
   }
   return parsed as Record<string, unknown>
 }
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+/** Settings booleans must be real booleans: "false" and 0 are client bugs. */
+function booleanField(
+  value: unknown,
+  field: string,
+  fallback: boolean,
+): { value: boolean } | { error: string } {
+  if (value === undefined) return { value: fallback }
+  if (typeof value !== 'boolean') return { error: `${field} must be a boolean` }
+  return { value }
 }
 
 function descriptorOf(
@@ -189,6 +209,10 @@ function publicProxy(proxy?: string): Record<string, unknown> {
       url.username = url.username ? '***' : ''
       url.password = ''
     }
+    // Query strings and fragments can carry proxy credentials too; the
+    // settings page only needs the endpoint.
+    url.search = ''
+    url.hash = ''
     return { proxy: url.toString(), proxyConfigured: true }
   } catch {
     return { proxyConfigured: true }
@@ -243,16 +267,6 @@ function parseProxy(value: unknown): { proxy?: string; error?: string } {
   } catch {
     return { error: 'invalid proxy URL' }
   }
-}
-
-function identityOf(auth: unknown): string {
-  if (!auth || typeof auth !== 'object' || Array.isArray(auth)) return ''
-  const record = auth as Record<string, unknown>
-  for (const key of ['accountId', 'uid', 'email']) {
-    const value = record[key]
-    if (typeof value === 'string' && value.trim()) return `${key}:${value.trim()}`
-  }
-  return ''
 }
 
 async function resolveAccountId(
@@ -324,9 +338,9 @@ export function registerHitchfinRoutes(
       stored.find((entry) => entry.accountId === accountId) ??
       (await accounts.get(descriptor.id, accountId).catch(() => undefined))
     if (!existing) {
-      const identity = identityOf(auth)
+      const identity = accountIdentity(auth)
       if (identity) {
-        existing = stored.find((entry) => identityOf(entry.auth) === identity)
+        existing = stored.find((entry) => accountIdentity(entry.auth) === identity)
       }
     }
 
@@ -374,7 +388,10 @@ export function registerHitchfinRoutes(
     handler: (req, res) => {
       void handle(req, res).catch((error) => {
         if (!res.headersSent) {
-          sendJson(res, 500, { ok: false, error: errorMessage(error) })
+          sendJson(res, error instanceof BadRequestError ? 400 : 500, {
+            ok: false,
+            error: errorMessage(error),
+          })
         } else {
           res.destroy()
         }
@@ -400,6 +417,7 @@ export function registerHitchfinRoutes(
           }
           const loadInfo = registry.loadInfo(descriptor)
           const packageAvailable = loadInfo !== undefined
+          const packageInfo = registry.packageInfo?.(descriptor)
 
           const views = await Promise.all(
             accountList.map(async (account) => {
@@ -517,6 +535,14 @@ export function registerHitchfinRoutes(
             displayName: descriptor.displayName,
             status: descriptor.status,
             packageAvailable,
+            ...(packageInfo
+              ? {
+                  packageVersion: packageInfo.version ?? null,
+                  packageExpectedVersion: packageInfo.expectedVersion,
+                  packageVersionMismatch: packageInfo.versionMatches === false,
+                  packageSource: packageInfo.source,
+                }
+              : {}),
             freeStatusKnown,
             freeMetadataExpected: descriptor.supportsFreeWindow,
             freeOnly:
@@ -752,10 +778,20 @@ export function registerHitchfinRoutes(
         return
       }
       const accountId = text(body.accountId)
+      const freeOnly = booleanField(body.freeOnly, 'freeOnly', true)
+      if ('error' in freeOnly) {
+        sendJson(res, 400, { ok: false, error: freeOnly.error })
+        return
+      }
       if (accountId) {
-        await accounts.setFreeOnly(descriptor.id, accountId, body.freeOnly !== false)
+        const account = await accounts.get(descriptor.id, accountId)
+        if (!account) {
+          sendJson(res, 404, { ok: false, error: 'unknown account' })
+          return
+        }
+        await accounts.setFreeOnly(descriptor.id, accountId, freeOnly.value)
       } else {
-        await accounts.setChannelFreeOnly(descriptor.id, body.freeOnly !== false)
+        await accounts.setChannelFreeOnly(descriptor.id, freeOnly.value)
       }
       modelsChanged(descriptor)
       sendJson(res, 200, { ok: true })
@@ -824,7 +860,17 @@ export function registerHitchfinRoutes(
         return
       }
       try {
-        await accounts.setEnabled(descriptor.id, accountId, body.enabled !== false)
+        const account = await accounts.get(descriptor.id, accountId)
+        if (!account) {
+          sendJson(res, 404, { ok: false, error: 'unknown account' })
+          return
+        }
+        const enabled = booleanField(body.enabled, 'enabled', true)
+        if ('error' in enabled) {
+          sendJson(res, 400, { ok: false, error: enabled.error })
+          return
+        }
+        await accounts.setEnabled(descriptor.id, accountId, enabled.value)
         adapter.forget(descriptor.providerId, accountId)
         modelsChanged(descriptor)
         sendJson(res, 200, { ok: true })
@@ -912,6 +958,13 @@ export function registerHitchfinRoutes(
         result.auth,
         state.proxy,
       )
+      if (isLoginCancelled(state)) {
+        // The credentials landed before the cancel arrived. Keep the account
+        // usable, but do not report a sign-in the user cancelled.
+        adapter.forget(descriptor.providerId, account.accountId)
+        modelsChanged(descriptor)
+        return
+      }
       adapter.forget(descriptor.providerId, account.accountId)
       modelsChanged(descriptor)
       state.accountId = account.accountId

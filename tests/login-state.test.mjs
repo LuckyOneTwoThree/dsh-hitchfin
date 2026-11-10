@@ -93,7 +93,12 @@ function harness(existingAccounts = [], routeOptions = {}) {
       cancelAuth() {
         cancelCount += 1
       },
-      apiKey: async () => ({ auth: {} }),
+      apiKey: async (_channel, _accountId, _method, key) => ({
+        auth:
+          routeOptions.apiKeyAuth !== undefined
+            ? { ...routeOptions.apiKeyAuth, ...(key ? { key } : {}) }
+            : {},
+      }),
       models: async () => [],
       usage: async () => ({}),
     },
@@ -288,6 +293,48 @@ test('an expired login cancels its worker session and never saves a late account
   }
 })
 
+test('re-adding the same API key reuses the existing account instead of duplicating it', async () => {
+  const key = 'sk-same-key-for-dedupe'
+  const { handler, saved, cleanup } = harness(
+    [
+      {
+        channelId: descriptor.id,
+        accountId: 'acct-1',
+        label: 'WorkBuddy CN',
+        auth: { type: 'api', key },
+        freeOnly: true,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ],
+    { apiKeyAuth: { type: 'api', key } },
+  )
+  try {
+    const first = await invoke(handler, 'POST', `${PREFIX}/login/apikey`, {
+      channelId: descriptor.id,
+      method: 2,
+      accountId: 'new',
+      key,
+    })
+    assert.equal(first.status, 200)
+    assert.equal(first.json.account.accountId, 'acct-1')
+    assert.equal(saved.length, 1)
+    assert.equal(saved[0].accountId, 'acct-1')
+
+    // A different key is a different account, so it gets a fresh id.
+    const second = await invoke(handler, 'POST', `${PREFIX}/login/apikey`, {
+      channelId: descriptor.id,
+      method: 2,
+      accountId: 'new',
+      key: 'sk-another-key',
+    })
+    assert.equal(second.status, 200)
+    assert.equal(second.json.account.accountId, 'acct-2')
+  } finally {
+    cleanup()
+  }
+})
+
 test('the fallback fence rejects a non-loopback Host header', async () => {
   const { handler, cleanup } = harness()
   try {
@@ -316,6 +363,54 @@ test('malformed Origin header is rejected by fenceRefused', async () => {
       await new Promise((resolve) => setTimeout(resolve, 5))
     }
     assert.equal(res.statusCode, 403)
+  } finally {
+    cleanup()
+  }
+})
+
+test('a non-boolean free-only flag is rejected instead of read as true', async () => {
+  const existing = [
+    { accountId: 'acct-1', channelId: 'workbuddy-cn', auth: { type: 'oauth', access: 'token' } },
+  ]
+  const { handler, cleanup } = harness(existing)
+  try {
+    const result = await invoke(handler, 'POST', `${PREFIX}/free-only`, {
+      channelId: 'workbuddy-cn',
+      accountId: 'acct-1',
+      freeOnly: 'false',
+    })
+    assert.equal(result.status, 400)
+    assert.match(result.json.error, /boolean/)
+  } finally {
+    cleanup()
+  }
+})
+
+test('a settings write for an unknown account returns 404', async () => {
+  const { handler, cleanup } = harness([])
+  try {
+    const result = await invoke(handler, 'POST', `${PREFIX}/account/enabled`, {
+      channelId: 'workbuddy-cn',
+      accountId: 'ghost',
+      enabled: false,
+    })
+    assert.equal(result.status, 404)
+  } finally {
+    cleanup()
+  }
+})
+
+test('a text/plain body is refused before it reaches a settings handler', async () => {
+  const { handler, cleanup } = harness([])
+  try {
+    const req = makeReq('POST', `${PREFIX}/free-only`, { channelId: 'workbuddy-cn' })
+    req.headers['content-type'] = 'text/plain;charset=UTF-8'
+    const res = makeRes()
+    handler(req, res)
+    for (let i = 0; i < 50 && !res.body; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.equal(res.statusCode, 400)
   } finally {
     cleanup()
   }

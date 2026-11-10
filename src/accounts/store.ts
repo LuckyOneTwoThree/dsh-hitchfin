@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { CredentialProvider, CredentialRecord } from '../types.js'
 
 export interface AccountPayload {
@@ -104,6 +105,29 @@ function parsePayload(record: CredentialRecord | undefined): AccountPayload | un
   }
 }
 
+/**
+ * A stable, non-reversible identity for an account's stored auth, used to
+ * recognize the same account (or API key) on a second sign-in.
+ *
+ * API-key auth has no account id, so the key itself is the identity. Only the
+ * SHA-256 digest is compared; the key never enters this value, a log line or
+ * the settings payload.
+ */
+export function accountIdentity(auth: unknown): string {
+  if (!auth || typeof auth !== 'object' || Array.isArray(auth)) return ''
+  const record = auth as Record<string, unknown>
+  if (record.type === 'api') {
+    const key = typeof record.key === 'string' ? record.key.trim() : ''
+    if (!key) return ''
+    return `key:${createHash('sha256').update(key).digest('hex')}`
+  }
+  for (const field of ['accountId', 'uid', 'email']) {
+    const value = record[field]
+    if (typeof value === 'string' && value.trim()) return `${field}:${value.trim()}`
+  }
+  return ''
+}
+
 /** A stable, masked account label derived from the channel's auth payload. */
 export function labelFromAuth(fallback: string, auth: unknown): string {
   if (!auth || typeof auth !== 'object' || Array.isArray(auth)) return fallback
@@ -113,7 +137,14 @@ export function labelFromAuth(fallback: string, auth: unknown): string {
   )
   if (typeof candidate !== 'string') return fallback
   const value = candidate.trim()
-  const masked = value.length > 8 ? `${value.slice(0, 4)}…${value.slice(-4)}` : value
+  // Short identities stay recognizable without printing the whole value: a
+  // four-character uid used to be shown verbatim in the settings list.
+  const masked =
+    value.length > 8
+      ? `${value.slice(0, 4)}…${value.slice(-4)}`
+      : value.length > 2
+        ? `${value.slice(0, 1)}…${value.slice(-1)}`
+        : value
   return `${fallback} · ${masked}`
 }
 
@@ -156,14 +187,17 @@ export class AccountStore {
   }
 
   async setChannelFreeOnly(channelId: string, freeOnly: boolean): Promise<void> {
-    const accounts = await this.list(channelId)
+    // Reads (/state) derive channel settings from enabled accounts only, so a
+    // channel-wide write must not silently rewrite a disabled account's own
+    // copy either.
+    const accounts = (await this.list(channelId)).filter((account) => account.enabled !== false)
     for (const account of accounts) {
       await this.setFreeOnly(channelId, account.accountId, freeOnly)
     }
   }
 
   async setChannelHiddenModels(channelId: string, hidden: readonly string[]): Promise<void> {
-    const accounts = await this.list(channelId)
+    const accounts = (await this.list(channelId)).filter((account) => account.enabled !== false)
     for (const account of accounts) {
       await this.setHiddenModels(channelId, account.accountId, hidden)
     }
@@ -176,17 +210,17 @@ export class AccountStore {
   /** Persist the visible account order as explicit priorities. */
   async setPriorities(channelId: string, orderedIds: readonly string[]): Promise<void> {
     const existing = await this.list(channelId)
-    const known = new Set(existing.map((account) => account.accountId))
-    const rank = new Map<string, number>()
-    orderedIds.forEach((id, index) => {
-      if (known.has(id) && !rank.has(id)) rank.set(id, index)
-    })
-    for (const account of existing) {
-      const next = rank.get(account.accountId)
-      if (next === undefined) continue
-      await this.update(channelId, account.accountId, (current) => ({
+    const byId = new Map(existing.map((account) => [account.accountId, account]))
+    // Listed accounts come first in the requested order; anything the caller
+    // omitted keeps its relative order at the end. A partial list must not
+    // leave two accounts sharing one priority.
+    const listed = orderedIds.filter((id) => byId.has(id))
+    const listedSet = new Set(listed)
+    const ordered = [...listed, ...existing.map((a) => a.accountId).filter((id) => !listedSet.has(id))]
+    for (const [index, accountId] of ordered.entries()) {
+      await this.update(channelId, accountId, (current) => ({
         ...current,
-        priority: next,
+        priority: index,
       }))
     }
   }
