@@ -23,7 +23,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.4.4-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.4.5-2F6B5F?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/tests-89%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
@@ -54,7 +54,7 @@ dsh plugin --profile web add dsh-hitchfin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.4.4.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.4.5.tgz
 ```
 
 > DSH Desktop 的 desktop profile 由 Electron 应用独占管理。请通过应用的 **插件** 页面或插件市场安装，不要手动修改 desktop profile。
