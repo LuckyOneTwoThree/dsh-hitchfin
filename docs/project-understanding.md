@@ -43,7 +43,7 @@ dsh-hitchfin 是运行在 DeepSeek Harness（DSH）内的原生订阅接入插�
 | `worker/index.mjs` | OpenCode / magpie shim、渠道包动态加载、登录、模型、额度、代理、厂商 fetch | 已入库，且是唯一入库的运行时产物 |
 | `src/routes.ts` | 约 13 个本地端点、loopback/Origin 围栏、登录状态机 | 已入库 |
 | `src/client/index.tsx` | 约 2700 行单体 React 设置页：样式、状态机、请求、渲染、双语 | 已入库 |
-| `tests/` | 109 项 Node 测试（0.4.5）：账号存储、适配器路由与冷却、SSE 映射、代理隧道 | 已入库 |
+| `tests/` | 110 项 Node 测试（0.4.5）：账号存储、适配器路由与冷却、SSE 映射、代理隧道 | 已入库 |
 | `lib/`、`client/` | tsc / esbuild 构建产物 | 未入库 |
 | `dsh-hitchfin-*.tgz` | 本地发布包 | 未入库 |
 | `magpie/` | 上游 `yetone/magpie` 本地克隆，仅作渠道包与 UI 参考 | 未入库，不参与构建与运行时 |
@@ -125,7 +125,7 @@ Qoder 与 Trae 的实时链路验证收益高，但受厂商侧条件约束，�
 
 已验证：
 
-- `npm run typecheck` 通过；`npm test` 109 / 109 通过（0.4.5 修复后）。
+- `npm run typecheck` 通过；`npm test` 110 / 110 通过（0.4.5 修复后）。
 - Node.js `v22.22.2`；DSH 宿主 `0.2.2-rc.1`。
 - `dsh-hitchfin-0.3.1.tgz` 共 47 项，关键产物齐全。
 - 本机 desktop profile 已安装 0.3.1 tarball（现场确认，非构建产物校验）。

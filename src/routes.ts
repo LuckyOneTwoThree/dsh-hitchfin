@@ -501,9 +501,14 @@ export function registerHitchfinRoutes(
             }
           }
 
+          // Channel-level settings describe the accounts that actually route.
+          // A disabled account keeps its own copy but must not decide the
+          // toggle (or the hidden intersection) for the enabled ones.
+          const settingAccounts = accountList.filter((account) => account.enabled !== false)
+          const channelAccounts = settingAccounts.length > 0 ? settingAccounts : accountList
           const hiddenModels = canonicalHiddenNames(
             mergedAll,
-            accountList.map((account) => account.hiddenModels ?? []),
+            channelAccounts.map((account) => account.hiddenModels ?? []),
           )
 
           return {
@@ -515,8 +520,8 @@ export function registerHitchfinRoutes(
             freeStatusKnown,
             freeMetadataExpected: descriptor.supportsFreeWindow,
             freeOnly:
-              accountList.length > 0
-                ? accountList.every((entry) => entry.freeOnly !== false)
+              channelAccounts.length > 0
+                ? channelAccounts.every((entry) => entry.freeOnly !== false)
                 : true,
             hiddenModels,
             methods: descriptor.authMethods,

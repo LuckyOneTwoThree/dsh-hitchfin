@@ -137,7 +137,12 @@ function makeRes() {
   }
 }
 
-async function stateFor(hiddenTokens, extraAccounts = [], modelsFor = async () => catalog) {
+async function stateFor(
+  hiddenTokens,
+  extraAccounts = [],
+  modelsFor = async () => catalog,
+  accountOverrides = {},
+) {
   let handler
   const account = {
     channelId: descriptor.id,
@@ -148,6 +153,7 @@ async function stateFor(hiddenTokens, extraAccounts = [], modelsFor = async () =
     hiddenModels: hiddenTokens,
     createdAt: 0,
     updatedAt: 0,
+    ...accountOverrides,
   }
   const ctx = {
     webServer: {
@@ -235,6 +241,29 @@ test('/state does not query or list a disabled account', async () => {
   assert.equal(calls.includes('acct-2'), false)
   assert.equal(channel.allModels.some((model) => model.id === 'disabled-only'), false)
   assert.equal(channel.accounts.find((entry) => entry.accountId === 'acct-2').enabled, false)
+})
+
+test('/state derives channel settings from enabled accounts only', async () => {
+  const channel = await stateFor(
+    [NAME.toLowerCase()],
+    [
+      {
+        channelId: descriptor.id,
+        accountId: 'acct-2',
+        label: 'disabled',
+        auth: { type: 'oauth', access: 'token-2' },
+        freeOnly: false,
+        hiddenModels: ['glm-5.3'],
+        enabled: false,
+        createdAt: 0,
+        updatedAt: 0,
+      },
+    ],
+    async () => catalog,
+    { freeOnly: true },
+  )
+  assert.equal(channel.freeOnly, true)
+  assert.deepEqual(channel.hiddenModels, [NAME.toLowerCase()])
 })
 
 test('/state still honours legacy id tokens', async () => {
