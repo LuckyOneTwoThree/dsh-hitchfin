@@ -23,8 +23,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.4.5-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-110%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/version-0.5.0-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-131%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -56,7 +56,7 @@ dsh plugin --profile web add dsh-hitchfin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.4.5.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.5.0.tgz
 ```
 
 > DSH Desktop 的 desktop profile 由 Electron 应用独占管理。请通过应用的 **插件** 页面或插件市场安装，不要手动修改 desktop profile。
@@ -125,7 +125,13 @@ dsh plugin --profile web add ./dsh-hitchfin-0.4.5.tgz
 | `SERVER` | 60 秒 |
 | `TRANSPORT` | 30 秒 |
 | `TIMEOUT` | 60 秒 |
+| `EMPTY_RESPONSE` | 30 秒 |
+| `CHANNEL_ERROR` | 60 秒 |
+| `PROXY` | 5 分钟 |
+| 其它未列出的失败 | 60 秒 |
 | `MODEL_NOT_FOUND` | 30 分钟，仅作用于该账号和该模型 |
+
+`ABORTED`、`WORKER_STOPPED`、`INVALID_REQUEST`、`UNSUPPORTED_CONTENT` 不进入冷却：换账号不能解决，或恢复由宿主自己完成。
 
 全部账号冷却时，请求会返回明确的重试时间，而不是继续请求厂商。厂商返回的 `Retry-After` 比默认值更长时，会延长任意失败类型的冷却。重新登录、修改代理、切换启用状态或删除账号，都会清理该账号的路由状态。
 
@@ -146,10 +152,19 @@ dsh plugin --profile web add ./dsh-hitchfin-0.4.5.tgz
 ## 隐私与边界
 
 - 凭据通过 DSH credential service 保存。插件不会把 token 写进自己的配置，也不会暴露给设置页渲染层。
-- 设置页只接收模型列表、额度摘要、掩码后的账号标签与代理地址。
+- 设置页只接收模型列表、额度摘要、掩码后的账号标签与代理地址。账号标签只保留首尾字符（如 `abcd…7890`、`s…t`）。
+- 用 API Key 重复登录同一个 key 时，插件用 key 的 SHA-256 摘要判断是否已存在，不会产生两个无法区分的账号；摘要只用于比较，不写日志、不进设置页。
 - 请求通过渠道包发往厂商官方接口。代理是可选的、按账号配置的，可随时清除。
 - 这是个人账号桥接工具：不共享账号、不刷免费额度、不自动签到、不绕过付费墙或限流。
 - 免费额度由厂商提供，可能随时变化或取消。请使用自己的账号并遵守各厂商条款。
+
+### 渠道包是受信任代码
+
+渠道能力来自 `@magpie-community/opencode-*-auth` 包。插件把它们加载到 DSH 的 worker 线程里执行——**worker 线程不是安全沙箱**，渠道包与插件同权限，可以访问环境变量和文件系统。只安装你信任的渠道包版本，并留意依赖升级。
+
+渠道包默认从插件自己的依赖里解析（`node_modules/@magpie-community/...`）。插件不再默认读取 `~/.config/magpie/plugins`——那棵树用户可写、且在依赖图之外。确实需要时才在插件配置里打开 `allowMagpieFallback: true`，启动日志会记录实际加载路径。
+
+插件按固定下标调用渠道包的登录方式（WorkBuddy 的 API Key 是下标 2）。升级渠道包后，若版本与插件声明的版本不一致，启动日志会给出警告；`npm run test:contract` 可以直接比对实际包的登录方式数组。
 
 ## 兼容性
 
@@ -168,6 +183,7 @@ npm install
 npm run typecheck
 npm run build
 npm test
+npm run test:contract   # 比对真实渠道包的登录方式数组
 ```
 
 - `src/adapter/`：DSH `LlmAdapter`、模型目录合并与账号路由。
@@ -175,7 +191,9 @@ npm test
 - `src/routes.ts`：本地设置 API，覆盖账号、登录、代理、模型可见性。
 - `src/format.ts`：额度窗口的展示口径（计数、千分位、占比）。
 - `src/client/`：DSH 原生设置页。
+- `scripts/contract-probe.mjs`：加载三个真实渠道包，校验登录方式下标与版本。
 - `tests/`：路由/冷却/故障转移、账号存储、代理隧道、SSE 映射与额度展示测试。
+- `.github/workflows/ci.yml`：Node 20/22/24（Ubuntu）与 Node 22（macOS）的 typecheck、测试、契约探针与打包检查。
 
 设计说明与验证记录见 [docs/development-plan.md](docs/development-plan.md)。发布前真实账号冒烟清单见 [docs/smoke-test.md](docs/smoke-test.md)。插件市场提交文案与发布检查清单见 [docs/marketplace-listing.md](docs/marketplace-listing.md)。
 

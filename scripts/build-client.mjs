@@ -34,4 +34,6 @@ ${innerCode}
 `
 
 writeFileSync(outFile, wrapped, 'utf8')
-console.log(`Built ${outFile} (${wrapped.length} bytes)`)
+// stdout stays machine-readable: `npm pack --json` parses whatever prepack
+// prints there, so build progress goes to stderr.
+process.stderr.write(`Built ${outFile} (${wrapped.length} bytes)\n`)

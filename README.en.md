@@ -23,8 +23,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.4.5-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-110%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/version-0.5.0-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-131%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -56,7 +56,7 @@ dsh plugin --profile web add dsh-hitchfin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.4.5.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.5.0.tgz
 ```
 
 > The DSH Desktop profile is managed by the Electron application. Install through the app's **Plugins** page or the plugin market rather than editing the desktop profile by hand.
@@ -125,7 +125,13 @@ You control which account is used, and the settings page makes it visible:
 | `SERVER` | 60 seconds |
 | `TRANSPORT` | 30 seconds |
 | `TIMEOUT` | 60 seconds |
+| `EMPTY_RESPONSE` | 30 seconds |
+| `CHANNEL_ERROR` | 60 seconds |
+| `PROXY` | 5 minutes |
+| Any other failure | 60 seconds |
 | `MODEL_NOT_FOUND` | 30 minutes, scoped to that account and model |
+
+`ABORTED`, `WORKER_STOPPED`, `INVALID_REQUEST` and `UNSUPPORTED_CONTENT` never cool down: another account cannot fix them, or the host handles recovery itself.
 
 When all accounts are cooling down, the request fails with a retry time instead of repeatedly hitting the vendors. A `Retry-After` value extends the cooldown for any failure type when it is longer than the default. Re-authenticating an account, changing its proxy, toggling it or removing it clears its routing state.
 
@@ -146,10 +152,19 @@ The channel package does not provide it, so *Free models only* has no effect on 
 ## Privacy and scope
 
 - Credentials are stored through DSH's credential service; the plugin does not write tokens into its own config or expose them to the settings renderer.
-- The settings page only receives models, quota summaries, masked account labels and a masked proxy URL.
+- The settings page only receives models, quota summaries, masked account labels and a masked proxy URL. Labels keep just the first and last character (`abcd…7890`, `s…t`).
+- Re-adding the same API key is matched through a SHA-256 digest of the key, so it updates the existing account instead of creating a second indistinguishable one. The digest is only compared; it never reaches a log line or the settings payload.
 - Requests go to the official vendor endpoints through the channel package. An optional proxy is per account and can be cleared at any time.
 - This is a personal-account bridge. It does not share accounts, farm free tiers, automate check-in, bypass paywalls or evade rate limits.
 - Free tiers are provided by the vendors and may change or disappear at any time. Use your own accounts and follow each vendor's terms.
+
+### Channel packages are trusted code
+
+Channel support comes from the `@magpie-community/opencode-*-auth` packages. The plugin runs them inside a DSH worker thread — **a worker thread is not a security sandbox**: a channel package has the plugin's privileges and can read the environment and the filesystem. Install only versions you trust and watch dependency upgrades.
+
+Packages resolve from the plugin's own dependencies (`node_modules/@magpie-community/...`). The plugin no longer reads `~/.config/magpie/plugins` by default, because that tree is user-writable and outside the dependency graph. Set `allowMagpieFallback: true` in the plugin config if you really need it; the startup log records the path that was actually loaded.
+
+Sign-in methods are called by fixed index (WorkBuddy's API key is index 2). After a channel-package upgrade, a version that differs from the one this plugin was written against is reported in the startup log, and `npm run test:contract` compares the real package's method array directly.
 
 ## Compatibility
 
@@ -168,6 +183,7 @@ npm install
 npm run typecheck
 npm run build
 npm test
+npm run test:contract   # compare the real channel packages' method arrays
 ```
 
 - `src/adapter/` — DSH `LlmAdapter`, model catalog merge and account routing.
@@ -175,7 +191,9 @@ npm test
 - `src/routes.ts` — local settings API: accounts, login, proxy, visibility.
 - `src/format.ts` — how usage windows are presented (counts, grouping, shares).
 - `src/client/` — native DSH settings section.
+- `scripts/contract-probe.mjs` — loads the three real channel packages and checks method indexes and versions.
 - `tests/` — adapter routing/cooldown/failover, account storage, proxy tunnel, SSE mapping and quota presentation tests.
+- `.github/workflows/ci.yml` — typecheck, tests, contract probe and pack check on Node 20/22/24 (Ubuntu) and Node 22 (macOS).
 
 See [docs/development-plan.md](docs/development-plan.md) for the design notes and verification history. The real-account pre-release smoke checklist lives in [docs/smoke-test.md](docs/smoke-test.md). Marketplace submission copy and the release checklist live in [docs/marketplace-listing.md](docs/marketplace-listing.md).
 

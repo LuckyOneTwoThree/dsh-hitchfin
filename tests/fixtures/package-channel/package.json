@@ -1,0 +1,6 @@
+{
+  "name": "@magpie-community/opencode-fixture-auth",
+  "version": "9.9.9",
+  "type": "module",
+  "main": "./index.mjs"
+}
