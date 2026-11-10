@@ -10,7 +10,7 @@ screenshots declared against the plugin repository URL.
 | --- | --- |
 | Name | `dsh-hitchfin` |
 | Category | `model` |
-| Version | `0.4.3` |
+| Version | `0.4.4` |
 | License | MIT |
 | DSH | `>= 0.2.2-rc.1` |
 | Repository | https://github.com/LuckyOneTwoThree/dsh-hitchfin |
@@ -128,7 +128,7 @@ there is a dedicated landing page).
    The npm `repository.url` must point back to this GitHub repository; the
    catalog uses it to resolve the npm mapping.
 5. Push the README, screenshots, icon and `screenshots.json` to `main`.
-6. Create a GitHub Release for `v0.4.3` (optional if npm is the install path;
+6. Create a GitHub Release for `v0.4.4` (optional if npm is the install path;
    recommended for source-free installs and a stable changelog).
 7. Open a PR to `awesome-dsh-plugin/awesome-dsh-plugin` with the YAML entry and
    the screenshots entry. Wait for the catalog CI to validate the repo,
@@ -140,7 +140,7 @@ there is a dedicated landing page).
 
 - [ ] `package.json` has `dsh.bundle.patch`, `engines.dsh`, `icon`, `repository`,
       `homepage`, `bugs`, `license` and a factual description.
-- [ ] `files` includes `assets`, `README.md`, `README.zh.md`, `lib`, `worker`,
+- [ ] `files` includes `assets`, `README.md`, `README.en.md`, `lib`, `worker`,
       `client`, `cordis.patch.yml` and `locale`.
 - [ ] All screenshots are sanitized and return HTTP 200 from `raw.githubusercontent.com`.
 - [ ] README clearly states personal-account-only usage and no automatic check-in.

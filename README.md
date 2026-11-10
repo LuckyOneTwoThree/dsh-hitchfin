@@ -5,150 +5,157 @@
 <h1 align="center">dsh-hitchfin</h1>
 
 <p align="center">
-  <strong>Use your existing WorkBuddy, Qoder and Trae subscriptions inside DeepSeek Harness.</strong>
+  <strong>把已经在用的 WorkBuddy、Qoder、Trae 订阅账号接进 DeepSeek Harness。</strong>
 </p>
 <p align="center">
-  Multi-account failover · per-account HTTP(S) proxies · free-model filter · model visibility
+  多账号优先级与故障转移 · 账号级 HTTP(S) 代理 · 免费模型过滤 · 模型可见性
 </p>
 
 <p align="center">
-  <a href="README.zh.md">简体中文</a> ·
-  <a href="#installation">Installation</a> ·
-  <a href="#features">Features</a> ·
-  <a href="#privacy-and-scope">Privacy</a> ·
-  <a href="#development">Development</a>
+  <a href="README.en.md">English</a> ·
+  <a href="#安装">安装</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#功能">功能</a> ·
+  <a href="#渠道">渠道</a> ·
+  <a href="#多账号路由">多账号路由</a> ·
+  <a href="#开发">开发</a>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.4.3-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.4.4-2F6B5F?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/tests-89%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
-![dsh-hitchfin settings](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-light.png)
+![dsh-hitchfin 设置页](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-light.png)
 
-## Why dsh-hitchfin
+## 为什么做这个插件
 
-DSH already has first-class API-key providers. `dsh-hitchfin` covers the other case: subscription plans you already pay for, accessed through their official account login flows.
+DSH 已经有一整套通用 API Key 供应商能力。`dsh-hitchfin` 覆盖的是另一种情况：你已经在付费或免费使用的订阅套餐，通过厂商官方账号登录来使用。
 
-It adds WorkBuddy CN, Qoder CN and Trae CN as native DSH model providers. Sign in with an official account, and the models you are entitled to appear in the DSH model picker. No account sharing, no automatic check-in, no attempt to bypass vendor limits.
+插件把 WorkBuddy CN、Qoder CN、Trae CN 注册成 DSH 原生模型供应商。用官方账号登录后，账号有权的模型会直接出现在 DSH 模型选择器里。不共享账号、不自动签到、不绕过厂商限制。
 
-## Features
+## 安装
 
-- **Official channels** — WorkBuddy CN, Qoder CN and Trae CN, with their official app icons and official login flows.
-- **Multi-account** — set a primary account, reorder failover, or disable an account without deleting its credentials, proxy and settings. Each card shows its role, last use and cooldown.
-- **Automatic failover** — requests stay on the last working account for a session and model; authentication, quota, rate-limit, server or transport failures move the request to another account before any content is emitted.
-- **Cooldown instead of hammering** — failed accounts cool down for a code-specific window; when every account is cooling down, DSH gets a clear retry time.
-- **Per-account HTTP(S) proxies** — a proxy is applied to that account's sign-in, model list, usage and chat requests. Other accounts stay direct. Proxy credentials are masked in the UI and are never written to logs.
-- **Free-model filter** — free-only is on by default. Channels without free/paid metadata (currently Trae CN) are shown in full instead of hiding everything.
-- **Model visibility** — search the catalog, hide individual models, or hide paid models in one action. Visibility settings apply to the whole channel.
-- **Native DSH UX** — channel tabs, inline quota progress, account menus, account-level proxy editor, model manager, toasts, dark mode and a 390px-wide layout.
-- **One-click browser sign-in** — clicking browser sign-in opens the system browser directly with the official authorization URL. The settings page keeps a re-open link as a fallback, not as a required second click.
-- **Local-first** — credentials live in DSH's credential store on this device. The plugin does not run telemetry or send account data anywhere except the vendor endpoints the channel package is designed to call.
+### 从 DSH 插件市场安装
 
-## Screenshots
+插件收录后，打开 **插件 → 发现**，搜索 **dsh-hitchfin**，从卡片直接安装。宿主提示需要重启时重启 DSH。
 
-| Model visibility | Dark mode |
-| --- | --- |
-| ![Model visibility](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/model-visibility.png) | ![Dark mode](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-dark.png) |
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/mobile.png" width="360" alt="Mobile layout" />
-</p>
-
-## Installation
-
-### From the DSH plugin market
-
-Once listed, open **Plugins → Discover**, search for **dsh-hitchfin**, and install it from the card. Restart DSH if the host asks you to.
-
-### From npm (web / CLI profiles)
-
-Once the npm package is published:
+### 从 npm 安装（Web / CLI profile）
 
 ```sh
 dsh plugin --profile web add dsh-hitchfin
 ```
 
-### From a local build
+### 从本地构建安装
 
 ```sh
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.4.3.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.4.4.tgz
 ```
 
-The DSH Desktop profile is managed by the Electron application. Install through the app's **Plugins** page or the plugin market rather than editing the desktop profile by hand.
+> DSH Desktop 的 desktop profile 由 Electron 应用独占管理。请通过应用的 **插件** 页面或插件市场安装，不要手动修改 desktop profile。
 
-After installation, open **Settings → 订阅接入**.
+环境要求见 [兼容性](#兼容性)。
 
-### Requirements
+## 快速开始
 
-- DSH `>= 0.2.2-rc.1`
-- Node.js `>= 20.18.1` (the host runtime in current DSH desktop builds already satisfies this)
-- macOS, Windows or Linux. Browser sign-in uses the platform's default-browser opener (`open`, `rundll32` or `xdg-open`).
+1. 打开 **设置 → 订阅接入**，选择一个渠道。
+2. 选择登录方式。浏览器登录会自动打开系统默认浏览器；渠道支持时也可以使用 API Key / PAT。
+3. 默认保持「只显示免费模型」。需要付费模型时再手动关闭。
+4. 模型会出现在 DSH 模型选择器里。之后可随时添加第二账号，或用上移/下移调整优先级。
 
-## Quick start
+## 功能
 
-1. Open **Settings → 订阅接入** and pick a channel.
-2. Choose a sign-in method. Browser sign-in opens your default browser automatically; use API Key / PAT where the channel offers it.
-3. Keep **Free models only** enabled unless you explicitly want paid models.
-4. The channel's models appear in the DSH model picker. Add a second account or configure an account proxy at any time.
+- **官方渠道**：WorkBuddy CN、Qoder CN、Trae CN，使用官方应用图标与官方登录流程。
+- **多账号**：指定主账号、调整故障转移顺序、单独停用账号而不删除凭据与设置。每张账号卡显示角色、最近使用时间、冷却倒计时，以及按账号的额度（已用 / 总量）。
+- **自动故障转移**：同一会话、同一模型优先沿用上次成功的账号；鉴权、额度、限流、服务端或传输失败时，在输出任何内容之前切换到其他账号。
+- **失败即冷却**：失败账号按错误类型进入冷却，不再继续请求厂商；全部账号冷却时，请求会明确返回重试时间。
+- **账号级 HTTP(S) 代理**：代理只作用于该账号的登录、模型列表、额度与聊天请求，其他账号保持直连；代理凭据在界面中掩码，不写入日志。
+- **免费模型过滤**：默认只显示免费模型。没有免费/付费元数据的渠道（目前是 Trae CN）显示全部模型，而不是全部隐藏。
+- **模型可见性**：支持搜索模型、逐个隐藏、一键隐藏全部付费模型；设置对整个渠道生效。
+- **原生 DSH 界面**：频道 Tab、额度进度条、账号菜单、行内代理编辑、模型管理、Toast、暗色模式与窄屏适配。
+- **浏览器登录直达**：点击浏览器登录后直接拉起系统默认浏览器；设置页里的「重新打开」只是兜底，不是必需的第二次点击。
+- **本地优先**：凭据保存在本机 DSH credential store。插件不做遥测，也不会把账号数据发到渠道包指定厂商接口以外的地方。
 
-## Channels
+## 截图
 
-| Channel | Status | Sign-in | Free/paid metadata | Verification |
-| --- | --- | --- | --- | --- |
-| WorkBuddy CN | Stable | Browser, API Key | Yes | Live model catalog and a real free-model chat request verified |
-| Qoder CN | Stable | Browser, PAT | Yes | Login flow verified; live chat validation is on the roadmap |
-| Trae CN | Experimental | Browser | No — all models are shown | Login flow verified; live catalog deduplicated from 90 internal IDs to 68 display models |
-
-Channel support is powered by maintained OpenCode-compatible adapter packages. Vendor catalogs, quotas and free-tier rules can change at any time.
-
-## Multi-account routing
-
-You control which account is used, and the settings page makes it visible:
-
-- **Primary and order** — the first enabled account is the primary one. Move accounts up or down to change failover order; the order is stored explicitly instead of depending on the host's credential record order.
-- **Per-account switch** — disabling an account keeps its credentials, proxy and model settings, but removes it from routing. Re-enable it at any time.
-- **Visible state** — each account shows primary / backup / disabled, its last successful use and any active cooldown countdown. Usage is per account only; there is no channel-wide quota aggregate.
-- **Session stickiness** — the route key is **provider + model + session**. A successful account stays preferred within that session to protect prompt-cache locality, so a session may keep using a backup account even when a primary is set. New sessions start from the primary and list order.
-- If the preferred account fails before the first stream chunk, the adapter tries the remaining enabled accounts in list order. Once any chunk has been emitted, the request is not switched mid-stream — you never get duplicated text from two accounts.
-- Cooldowns:
-
-| Failure | Cooldown |
+| 模型可见性 | 暗色模式 |
 | --- | --- |
-| `AUTH` | 10 minutes |
-| `QUOTA` | 15 minutes |
-| `RATE_LIMIT` | 60 seconds |
-| `SERVER` | 60 seconds |
-| `TRANSPORT` | 30 seconds |
-| `TIMEOUT` | 60 seconds |
-| `MODEL_NOT_FOUND` | 30 minutes, scoped to that account and model |
+| ![模型可见性](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/model-visibility.png) | ![暗色模式](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-dark.png) |
 
-When all accounts are cooling down, the request fails with a retry time instead of repeatedly hitting the vendors. A `Retry-After` value extends the cooldown for any failure type when it is longer than the default. Re-authenticating an account, changing its proxy, toggling it or removing it clears its routing state.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/mobile.png" width="360" alt="窄屏布局" />
+</p>
 
-## Privacy and scope
+## 渠道
 
-- Credentials are stored through DSH's credential service; the plugin does not write tokens into its own config or expose them to the settings renderer.
-- The settings page only receives models, quota summaries, masked account labels and a masked proxy URL.
-- Requests go to the official vendor endpoints through the channel package. An optional proxy is per account and can be cleared at any time.
-- This is a personal-account bridge. It does not share accounts, farm free tiers, automate check-in, bypass paywalls or evade rate limits.
-- Free tiers are provided by the vendors and may change or disappear at any time. Use your own accounts and follow each vendor's terms.
+| 渠道 | 状态 | 登录方式 | 免费/付费标记 | 验证情况 |
+| --- | --- | --- | --- | --- |
+| WorkBuddy CN | 稳定 | 浏览器、API Key | 有 | 已验证真实模型目录与真实免费模型对话 |
+| Qoder CN | 稳定 | 浏览器、PAT | 有 | 已验证登录链路；真实对话验证在路线图中 |
+| Trae CN | 实验性 | 浏览器 | 无，显示全部模型 | 已验证登录链路；真实模型目录已从 90 个内部 ID 去重为 68 个显示模型 |
 
-## Compatibility
+渠道能力来自持续维护的 OpenCode 兼容适配包。厂商模型目录、额度和免费层规则可能随时变化。
 
-| Item | Requirement |
+## 多账号路由
+
+用哪个账号由你控制，而且看得见：
+
+- **主账号与顺序**：列表中第一个启用账号是主账号。用上移/下移调整故障转移顺序，顺序会显式保存，不再依赖宿主返回凭据记录的顺序。
+- **账号开关**：停用账号会保留凭据、代理与模型设置，只是不再参与路由，可随时重新启用。
+- **状态可见**：每张账号卡显示主账号 / 备用 / 已停用、最近一次成功使用时间和冷却倒计时。额度只按账号展示——不同账号的额度不能相加，所以插件不提供渠道级的「总余额」。
+- **会话粘滞**：路由键是 **供应商 + 模型 + 会话**。同一会话内成功的账号会继续保持优先，以保护 prompt cache 命中率；因此即使设了主账号，某个会话仍可能继续用备用账号。新会话从主账号和列表顺序开始。
+- 首选账号在首个流式内容之前失败时，会按列表顺序尝试其余启用账号；一旦已经输出内容，不再中途换号，避免同一段回复出现两份文本。
+
+| 失败类型 | 冷却时间 |
+| --- | --- |
+| `AUTH` | 10 分钟 |
+| `QUOTA` | 15 分钟 |
+| `RATE_LIMIT` | 60 秒 |
+| `SERVER` | 60 秒 |
+| `TRANSPORT` | 30 秒 |
+| `TIMEOUT` | 60 秒 |
+| `MODEL_NOT_FOUND` | 30 分钟，仅作用于该账号和该模型 |
+
+全部账号冷却时，请求会返回明确的重试时间，而不是继续请求厂商。厂商返回的 `Retry-After` 比默认值更长时，会延长任意失败类型的冷却。重新登录、修改代理、切换启用状态或删除账号，都会清理该账号的路由状态。
+
+## 常见问题
+
+**登录后模型选择器里没有模型。**
+先确认该渠道至少有一个账号处于启用状态，再检查「模型可见性」是否把模型全部隐藏了。对提供免费/付费标记的渠道（WorkBuddy、Qoder），「只显示免费模型」也会过滤掉付费模型。
+
+**设了主账号，某个会话却仍在用备用账号。**
+这是会话粘滞：同一会话、同一模型会沿用上次成功的账号，以保护 prompt cache。新会话才会从主账号和列表顺序开始。
+
+**额度显示「额度暂不可用」。**
+额度是独立请求（5 秒超时）。厂商接口偶发失败时会显示这句，不影响对话和模型列表，稍后会自行恢复。
+
+**Trae CN 为什么没有免费/付费标记。**
+渠道包不提供该元数据，所以「只显示免费模型」对 Trae 不生效，Trae 会显示全部模型。
+
+## 隐私与边界
+
+- 凭据通过 DSH credential service 保存。插件不会把 token 写进自己的配置，也不会暴露给设置页渲染层。
+- 设置页只接收模型列表、额度摘要、掩码后的账号标签与代理地址。
+- 请求通过渠道包发往厂商官方接口。代理是可选的、按账号配置的，可随时清除。
+- 这是个人账号桥接工具：不共享账号、不刷免费额度、不自动签到、不绕过付费墙或限流。
+- 免费额度由厂商提供，可能随时变化或取消。请使用自己的账号并遵守各厂商条款。
+
+## 兼容性
+
+| 项目 | 要求 |
 | --- | --- |
 | DSH | `>= 0.2.2-rc.1` |
-| Node.js | `>= 20.18.1` |
-| Profiles | DSH Web and DSH Desktop |
-| OS | macOS, Windows, Linux |
-| DSH model UI | Model picker, per-model badges, reasoning effort metadata when provided by the channel |
+| Node.js | `>= 20.18.1`（当前 DSH Desktop 自带运行时已满足） |
+| Profile | DSH Web、DSH Desktop |
+| 系统 | macOS、Windows、Linux；浏览器登录使用平台默认打开方式（`open`、`rundll32` 或 `xdg-open`） |
+| 模型界面 | 模型选择器、模型 badge、渠道提供时的 reasoning effort 元数据 |
 
-## Development
+## 开发
 
 ```sh
 npm install
@@ -157,28 +164,29 @@ npm run build
 npm test
 ```
 
-- `src/adapter/` — DSH `LlmAdapter`, model catalog merge and account routing.
-- `worker/` — channel package host, proxy dispatcher and OpenAI-compatible stream bridge.
-- `src/routes.ts` — local settings API: accounts, login, proxy, visibility.
-- `src/client/` — native DSH settings section.
-- `tests/` — adapter routing/cooldown/failover, account storage, proxy tunnel and SSE mapping tests.
+- `src/adapter/`：DSH `LlmAdapter`、模型目录合并与账号路由。
+- `worker/`：渠道包宿主持久化、代理 dispatcher 与 OpenAI 兼容流桥接。
+- `src/routes.ts`：本地设置 API，覆盖账号、登录、代理、模型可见性。
+- `src/format.ts`：额度窗口的展示口径（计数、千分位、占比）。
+- `src/client/`：DSH 原生设置页。
+- `tests/`：路由/冷却/故障转移、账号存储、代理隧道、SSE 映射与额度展示测试。
 
-See [docs/development-plan.md](docs/development-plan.md) for the design notes and verification history. Marketplace submission copy and the release checklist live in [docs/marketplace-listing.md](docs/marketplace-listing.md).
+设计说明与验证记录见 [docs/development-plan.md](docs/development-plan.md)。插件市场提交文案与发布检查清单见 [docs/marketplace-listing.md](docs/marketplace-listing.md)。
 
-## Roadmap
+## 路线图
 
-- Qoder CN and Trae CN live chat verification.
-- More granular per-account quota refresh diagnostics.
-- Additional channels only when their official login and terms permit this kind of bridge.
+- Qoder CN、Trae CN 真实对话验证。
+- 更细的按账号额度刷新诊断。
+- 仅在官方登录方式和条款允许时增加新渠道。
 
-Trae CN is intentionally marked experimental. OpenCode Zen is not part of this plugin.
+Trae CN 仍标记为实验性。OpenCode Zen 不包含在此插件中。
 
-## About
+## 关于
 
-`dsh-hitchfin` is an independent community plugin for DeepSeek Harness. It is not affiliated with DeepSeek, Tencent, Alibaba, ByteDance or the maintainers of the channel adapter packages. WorkBuddy, Qoder, Trae and their logos are trademarks of their respective owners.
+`dsh-hitchfin` 是面向 DeepSeek Harness 的独立社区插件，与 DeepSeek、腾讯、阿里巴巴、字节跳动及渠道适配包维护方没有隶属关系。WorkBuddy、Qoder、Trae 及相关图标是各自权利人的商标。
 
-If you find a channel-package or vendor-side issue, please open an issue with the DSH version, channel, sign-in method and a redacted error message. Never paste access tokens, refresh tokens or full credential payloads.
+如果遇到渠道包或厂商侧问题，请附上 DSH 版本、渠道、登录方式和脱敏后的错误信息提交 issue。不要粘贴 access token、refresh token 或完整凭据。
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT，详见 [LICENSE](LICENSE)。
