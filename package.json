@@ -1,6 +1,6 @@
 {
   "name": "dsh-hitchfin",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Bring WorkBuddy, Qoder and Trae subscription models into DeepSeek Harness with multi-account failover, per-account proxies and model controls. · 将 WorkBuddy、Qoder、Trae 的订阅模型接入 DSH。",
   "icon": "assets/icon.svg",
   "type": "module",
@@ -49,7 +49,7 @@
     "cordis.patch.yml",
     "locale",
     "README.md",
-    "README.zh.md",
+    "README.en.md",
     "LICENSE"
   ],
   "dsh": {
