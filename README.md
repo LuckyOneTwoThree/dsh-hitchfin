@@ -21,8 +21,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.4.0-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-65%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/version-0.4.1-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-73%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -77,7 +77,7 @@ dsh plugin --profile web add dsh-hitchfin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.4.0.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.4.1.tgz
 ```
 
 The DSH Desktop profile is managed by the Electron application. Install through the app's **Plugins** page or the plugin market rather than editing the desktop profile by hand.
