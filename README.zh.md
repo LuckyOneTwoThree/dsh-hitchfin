@@ -21,8 +21,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.4.1-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-73%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/version-0.4.2-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-81%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -37,7 +37,7 @@ DSH 已经有完整的通用 API Key 供应商能力。`dsh-hitchfin` 覆盖的�
 ## 功能
 
 - **官方渠道**：WorkBuddy CN、Qoder CN、Trae CN，使用官方应用图标和官方登录流程。
-- **多账号**：同一渠道可保存多个账号，独立添加、重新登录、删除，互不影响。
+- **多账号**：可指定主账号、调整故障转移顺序、单独停用账号而不删除凭据与设置；每张账号卡显示角色、最近使用和冷却状态。
 - **自动故障转移**：同一会话、同一模型优先使用上次成功的账号；鉴权、额度、限流、服务端或传输失败时，在输出任何内容前切换到其他账号。
 - **冷却而非硬碰**：失败账号按错误类型进入冷却；全部账号冷却时，请求会明确返回重试时间。
 - **账号级 HTTP(S) 代理**：代理只作用于该账号的登录、模型列表、额度与聊天请求；其他账号保持直连。代理凭据在界面中掩码，不写入日志。
@@ -77,7 +77,7 @@ dsh plugin --profile web add dsh-hitchfin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.4.1.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.4.2.tgz
 ```
 
 DSH Desktop 的 desktop profile 由 Electron 应用独占管理，请通过应用的 **插件** 页面或插件市场安装，不要手动修改 desktop profile。
@@ -109,23 +109,26 @@ DSH Desktop 的 desktop profile 由 Electron 应用独占管理，请通过应�
 
 ## 多账号路由
 
-路由规则是确定且可解释的：
+用哪个账号由你控制，设置页也能看得到：
 
-- 路由键是 **供应商 + 模型 + 会话**。成功后该键优先使用这个账号，保护 prompt cache 命中。
-- 首选账号在输出首个流式内容前失败时，会尝试其他已登录账号。
-- 一旦已经开始输出内容，不会中途换号，避免同一段回复出现两份文本。
+- **主账号与顺序**：列表中第一个启用账号为主账号。用上移/下移调整故障转移顺序；顺序会显式保存，不再依赖宿主返回凭据记录的顺序。
+- **账号开关**：停用账号会保留凭据、代理与模型设置，只是不再参与路由，可随时重新启用。
+- **状态可见**：每张账号卡显示主账号 / 备用 / 已停用、最近一次成功使用时间，以及正在进行的冷却倒计时。额度只按账号展示，不再提供容易误解的渠道级聚合额度。
+- **会话粘滞**：路由键是 **供应商 + 模型 + 会话**。同一会话内成功的账号会继续保持优先，以保护 prompt cache 命中；因此即使设置了主账号，某个会话仍可能继续使用备用账号。新会话从主账号和列表顺序开始。
+- 首选账号在首个流式块之前失败时，会按列表顺序尝试其余启用账号；一旦已产出任何块，不再中途换号，避免同一段回复出现两份文本。
 - 冷却时间：
 
 | 失败类型 | 冷却时间 |
 | --- | --- |
 | `AUTH` | 10 分钟 |
 | `QUOTA` | 15 分钟 |
-| `RATE_LIMIT` | 60 秒；厂商提供 `Retry-After` 时以其为准 |
+| `RATE_LIMIT` | 60 秒 |
 | `SERVER` | 60 秒 |
 | `TRANSPORT` | 30 秒 |
+| `TIMEOUT` | 60 秒 |
 | `MODEL_NOT_FOUND` | 30 分钟，仅作用于该账号和该模型 |
 
-全部账号冷却时，请求会返回明确的重试时间，而不是继续请求厂商。重新登录、修改代理或删除账号会清理该账号的路由状态。
+全部账号冷却时，请求会返回明确的重试时间，而不是继续请求厂商。厂商返回的 `Retry-After` 比默认冷却更长时，会延长任意失败类型的冷却。重新登录、修改代理、切换启用状态或删除账号，都会清理该账号的路由状态。
 
 ## 隐私与边界
 

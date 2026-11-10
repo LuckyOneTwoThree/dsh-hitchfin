@@ -21,8 +21,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.4.1-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-73%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/version-0.4.2-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-81%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -37,7 +37,7 @@ It adds WorkBuddy CN, Qoder CN and Trae CN as native DSH model providers. Sign i
 ## Features
 
 - **Official channels** — WorkBuddy CN, Qoder CN and Trae CN, with their official app icons and official login flows.
-- **Multi-account** — keep more than one account per channel. Add, re-authenticate or remove them without touching the others.
+- **Multi-account** — set a primary account, reorder failover, or disable an account without deleting its credentials, proxy and settings. Each card shows its role, last use and cooldown.
 - **Automatic failover** — requests stay on the last working account for a session and model; authentication, quota, rate-limit, server or transport failures move the request to another account before any content is emitted.
 - **Cooldown instead of hammering** — failed accounts cool down for a code-specific window; when every account is cooling down, DSH gets a clear retry time.
 - **Per-account HTTP(S) proxies** — a proxy is applied to that account's sign-in, model list, usage and chat requests. Other accounts stay direct. Proxy credentials are masked in the UI and are never written to logs.
@@ -77,7 +77,7 @@ dsh plugin --profile web add dsh-hitchfin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.4.1.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.4.2.tgz
 ```
 
 The DSH Desktop profile is managed by the Electron application. Install through the app's **Plugins** page or the plugin market rather than editing the desktop profile by hand.
@@ -109,23 +109,26 @@ Channel support is powered by maintained OpenCode-compatible adapter packages. V
 
 ## Multi-account routing
 
-Routing is deterministic and documented, not a black box:
+You control which account is used, and the settings page makes it visible:
 
-- The route key is **provider + model + session**. A successful account becomes the preferred account for that key, protecting prompt-cache locality.
-- If the preferred account fails before the first stream chunk, the adapter tries other signed-in accounts.
-- Once any content has been emitted, the request is not switched mid-stream — you never get duplicated text from two accounts.
+- **Primary and order** — the first enabled account is the primary one. Move accounts up or down to change failover order; the order is stored explicitly instead of depending on the host's credential record order.
+- **Per-account switch** — disabling an account keeps its credentials, proxy and model settings, but removes it from routing. Re-enable it at any time.
+- **Visible state** — each account shows primary / backup / disabled, its last successful use and any active cooldown countdown. Usage is per account only; there is no channel-wide quota aggregate.
+- **Session stickiness** — the route key is **provider + model + session**. A successful account stays preferred within that session to protect prompt-cache locality, so a session may keep using a backup account even when a primary is set. New sessions start from the primary and list order.
+- If the preferred account fails before the first stream chunk, the adapter tries the remaining enabled accounts in list order. Once any chunk has been emitted, the request is not switched mid-stream — you never get duplicated text from two accounts.
 - Cooldowns:
 
 | Failure | Cooldown |
 | --- | --- |
 | `AUTH` | 10 minutes |
 | `QUOTA` | 15 minutes |
-| `RATE_LIMIT` | 60 seconds, or `Retry-After` when provided |
+| `RATE_LIMIT` | 60 seconds |
 | `SERVER` | 60 seconds |
 | `TRANSPORT` | 30 seconds |
+| `TIMEOUT` | 60 seconds |
 | `MODEL_NOT_FOUND` | 30 minutes, scoped to that account and model |
 
-When all accounts are cooling down, the request fails with a retry time instead of repeatedly hitting the vendors. Re-authenticating an account, changing its proxy or removing it clears its routing state.
+When all accounts are cooling down, the request fails with a retry time instead of repeatedly hitting the vendors. A `Retry-After` value extends the cooldown for any failure type when it is longer than the default. Re-authenticating an account, changing its proxy, toggling it or removing it clears its routing state.
 
 ## Privacy and scope
 
