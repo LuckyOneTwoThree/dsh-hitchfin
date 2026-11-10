@@ -10,7 +10,7 @@ screenshots declared against the plugin repository URL.
 | --- | --- |
 | Name | `dsh-hitchfin` |
 | Category | `model` |
-| Version | `0.3.1` |
+| Version | `0.4.0` |
 | License | MIT |
 | DSH | `>= 0.2.2-rc.1` |
 | Repository | https://github.com/LuckyOneTwoThree/dsh-hitchfin |
@@ -128,7 +128,7 @@ there is a dedicated landing page).
    The npm `repository.url` must point back to this GitHub repository; the
    catalog uses it to resolve the npm mapping.
 5. Push the README, screenshots, icon and `screenshots.json` to `main`.
-6. Create a GitHub Release for `v0.3.1` (optional if npm is the install path;
+6. Create a GitHub Release for `v0.4.0` (optional if npm is the install path;
    recommended for source-free installs and a stable changelog).
 7. Open a PR to `awesome-dsh-plugin/awesome-dsh-plugin` with the YAML entry and
    the screenshots entry. Wait for the catalog CI to validate the repo,
