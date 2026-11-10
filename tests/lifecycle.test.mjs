@@ -257,7 +257,7 @@ test('a stopped host rejects fetch calls without leaking a pending stream', asyn
 test('a stalled response body is aborted by the idle watchdog', async () => {
   const host = new ChannelWorkerHost({
     workerPath: stallWorker,
-    streamIdleTimeoutMs: 40,
+    streamIdleTimeoutMs: 300,
   })
   try {
     const response = await host.fetch(
@@ -281,7 +281,7 @@ test('a stalled response body is aborted by the idle watchdog', async () => {
 test('a channel that never sends headers times out the fetch itself', async () => {
   const host = new ChannelWorkerHost({
     workerPath: stallWorker,
-    streamIdleTimeoutMs: 40,
+    streamIdleTimeoutMs: 300,
   })
   try {
     await assert.rejects(
