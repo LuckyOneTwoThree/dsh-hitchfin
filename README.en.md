@@ -83,13 +83,17 @@ Requirements are listed under [Compatibility](#compatibility).
 
 ## Screenshots
 
-| Model visibility | Dark mode |
-| --- | --- |
-| ![Model visibility](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/model-visibility.png) | ![Dark mode](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-dark.png) |
+**Multi-account management** — a switch per account, ↑ ↓ to reorder the retry chain, and clear primary / backup / cooling / disabled states.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/mobile.png" width="360" alt="Narrow layout" />
-</p>
+![Multi-account management](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/accounts.png)
+
+**Dark mode** — follows the DSH theme, with progress bars and status colours tuned for dark surfaces.
+
+![Dark mode](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-dark.png)
+
+**Model visibility** — search within a channel, hide models one by one, or hide every paid model at once.
+
+![Model visibility](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/model-visibility.png)
 
 ## Channels
 

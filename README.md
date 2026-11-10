@@ -83,13 +83,17 @@ dsh plugin --profile web add ./dsh-hitchfin-0.4.4.tgz
 
 ## 截图
 
-| 模型可见性 | 暗色模式 |
-| --- | --- |
-| ![模型可见性](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/model-visibility.png) | ![暗色模式](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-dark.png) |
+**多账号管理**：每个账号独立开关，用 ↑ ↓ 调整尝试顺序；主账号、备用、冷却与停用状态一眼可辨。
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/mobile.png" width="360" alt="窄屏布局" />
-</p>
+![多账号管理](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/accounts.png)
+
+**暗色模式**：跟随 DSH 主题切换，暗色下额度条与状态色单独调过对比度。
+
+![暗色模式](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-dark.png)
+
+**模型可见性**：按渠道搜索模型、逐个隐藏，或一键隐藏全部付费模型。
+
+![模型可见性](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/model-visibility.png)
 
 ## 渠道
 
