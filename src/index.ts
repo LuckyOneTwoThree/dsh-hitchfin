@@ -16,6 +16,11 @@ export interface HitchfinConfig {
   devStaticModels?: boolean
   /** Override channel package entry paths, keyed by channel id. */
   channelPackages?: Record<string, string>
+  /**
+   * Load a channel package from `~/.config/magpie/plugins` when it is not
+   * installed beside this plugin. That tree is user-writable, so it is opt-in.
+   */
+  allowMagpieFallback?: boolean
 }
 
 interface AttachmentReaderLike {
@@ -39,7 +44,10 @@ function attachmentReader(ctx: HitchfinContext): AttachmentReaderLike | undefine
 }
 
 export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
-  const registry = new ChannelRegistry(config.channelPackages ?? {})
+  const registry = new ChannelRegistry({
+    overrides: config.channelPackages ?? {},
+    allowMagpieFallback: config.allowMagpieFallback === true,
+  })
   const accounts = new AccountStore(ctx.credentials)
   let authChanged:
     | ((channelId: string, accountId: string, auth: unknown) => void)
@@ -52,6 +60,26 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
       ctx.logger.info(`dsh-hitchfin: loaded channel package ${channelId} from ${packagePath}`)
     },
   })
+
+  // The auth-method indexes below mirror one exact channel-package release.
+  // A newer package can reorder or extend that array, which would silently
+  // route a sign-in to the wrong method; say so once instead of guessing.
+  for (const descriptor of registry.all()) {
+    const info = registry.packageInfo(descriptor)
+    if (!info) continue
+    if (info.source === 'magpie-fallback') {
+      ctx.logger.warn(
+        `dsh-hitchfin: ${descriptor.displayName} loaded from the magpie fallback at ${info.path}; ` +
+          'install the channel package beside this plugin instead of relying on a user-writable tree',
+      )
+    }
+    if (info.versionMatches === false) {
+      ctx.logger.warn(
+        `dsh-hitchfin: ${descriptor.packageName} is ${info.version}, expected ${info.expectedVersion}; ` +
+          'sign-in method indexes may not match this release',
+      )
+    }
+  }
 
   const devSpike = config.devSpike === true
   const readImage = (

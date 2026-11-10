@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { ChannelDescriptor } from './descriptor.js'
 import type { ChannelLoadInfo } from '../host/worker-host.js'
 
@@ -9,11 +9,25 @@ const require = createRequire(import.meta.url)
 
 const MAGPIE_PLUGINS = join(homedir(), '.config', 'magpie', 'plugins', 'node_modules', '@magpie-community')
 
+/** How a channel package entry was found; surfaced so a stale copy is visible. */
+export type PackageSource = 'installed' | 'override' | 'magpie-fallback'
+
+export interface ChannelPackageInfo {
+  path: string
+  source: PackageSource
+  /** Version declared by the package on disk, when it can be read. */
+  version?: string
+  /** Version this plugin's auth-method indexes were written against. */
+  expectedVersion: string
+  /** `undefined` when the package version could not be read. */
+  versionMatches?: boolean
+}
+
 function fallbackPackagePath(name: string): string {
   return join(MAGPIE_PLUGINS, name, 'index.mjs')
 }
 
-function resolvePackagePath(packageName: string, fallbackPath: string): string | undefined {
+function resolveInstalled(packageName: string): string | undefined {
   // The channel packages export their OpenCode 2.x face at ".", so
   // `${packageName}/index.mjs` and `${packageName}/package.json` may both be
   // blocked by their exports map. Resolve the package main, then take the
@@ -33,7 +47,27 @@ function resolvePackagePath(packageName: string, fallbackPath: string): string |
   } catch {
     // Fall through to the dev fallback.
   }
-  return existsSync(fallbackPath) ? fallbackPath : undefined
+  return undefined
+}
+
+/** Read the nearest package.json above a module entry. */
+function readPackageVersion(entryPath: string): string | undefined {
+  let directory = dirname(resolve(entryPath))
+  for (let depth = 0; depth < 6; depth += 1) {
+    const candidate = join(directory, 'package.json')
+    if (existsSync(candidate)) {
+      try {
+        const parsed = JSON.parse(readFileSync(candidate, 'utf8')) as { version?: unknown }
+        return typeof parsed.version === 'string' ? parsed.version : undefined
+      } catch {
+        return undefined
+      }
+    }
+    const parent = dirname(directory)
+    if (parent === directory) return undefined
+    directory = parent
+  }
+  return undefined
 }
 
 export const WORKBUDDY: ChannelDescriptor = {
@@ -106,6 +140,17 @@ export const TRAE: ChannelDescriptor = {
   fallbackPath: fallbackPackagePath('opencode-trae-auth'),
 }
 
+export interface ChannelRegistryOptions {
+  /** Channel id -> explicit package entry path. */
+  overrides?: Record<string, string>
+  /**
+   * Allow loading a channel package from `~/.config/magpie/plugins`. That tree
+   * is user-writable and outside this plugin's dependency graph, so it is off
+   * unless the operator asks for it.
+   */
+  allowMagpieFallback?: boolean
+}
+
 export class ChannelRegistry {
   private readonly channels = new Map<string, ChannelDescriptor>([
     [WORKBUDDY.providerId, WORKBUDDY],
@@ -113,7 +158,15 @@ export class ChannelRegistry {
     [TRAE.providerId, TRAE],
   ])
 
-  constructor(private readonly overrides: Record<string, string> = {}) {}
+  private readonly overrides: Record<string, string>
+  private readonly allowMagpieFallback: boolean
+  /** Resolution is disk-bound and stable for a process; `/state` asks often. */
+  private readonly packageCache = new Map<string, ChannelPackageInfo | undefined>()
+
+  constructor(options: ChannelRegistryOptions = {}) {
+    this.overrides = options.overrides ?? {}
+    this.allowMagpieFallback = options.allowMagpieFallback === true
+  }
 
   all(): readonly ChannelDescriptor[] {
     return [...this.channels.values()]
@@ -127,16 +180,49 @@ export class ChannelRegistry {
     return [...this.channels.keys()]
   }
 
+  /** Where a channel's package would be loaded from, plus its declared version. */
+  packageInfo(descriptor: ChannelDescriptor): ChannelPackageInfo | undefined {
+    const cached = this.packageCache.get(descriptor.id)
+    if (cached !== undefined || this.packageCache.has(descriptor.id)) return cached
+    const info = this.resolvePackageInfo(descriptor)
+    this.packageCache.set(descriptor.id, info)
+    return info
+  }
+
+  private resolvePackageInfo(descriptor: ChannelDescriptor): ChannelPackageInfo | undefined {
+    const override = this.overrides[descriptor.id]
+    const installed = override ?? resolveInstalled(descriptor.packageName)
+    const source: PackageSource = override
+      ? 'override'
+      : installed
+        ? 'installed'
+        : 'magpie-fallback'
+    const path =
+      installed ??
+      (this.allowMagpieFallback && existsSync(descriptor.fallbackPath)
+        ? descriptor.fallbackPath
+        : undefined)
+    if (!path) return undefined
+    const version = readPackageVersion(path)
+    return {
+      path,
+      source,
+      ...(version ? { version } : {}),
+      expectedVersion: descriptor.packageVersion,
+      ...(version ? { versionMatches: version === descriptor.packageVersion } : {}),
+    }
+  }
+
   packagePath(descriptor: ChannelDescriptor): string | undefined {
-    return this.overrides[descriptor.id] ?? resolvePackagePath(descriptor.packageName, descriptor.fallbackPath)
+    return this.packageInfo(descriptor)?.path
   }
 
   loadInfo(descriptor: ChannelDescriptor, options: Record<string, unknown> = {}): ChannelLoadInfo | undefined {
-    const packagePath = this.packagePath(descriptor)
-    if (!packagePath) return undefined
+    const info = this.packageInfo(descriptor)
+    if (!info) return undefined
     return {
       channelId: descriptor.id,
-      packagePath,
+      packagePath: info.path,
       exportName: descriptor.exportName,
       provider: descriptor.packageProvider,
       options,

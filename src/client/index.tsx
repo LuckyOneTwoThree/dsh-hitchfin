@@ -56,6 +56,12 @@ interface Channel {
   displayName: string
   status: 'stable' | 'experimental'
   packageAvailable: boolean
+  /** Version the installed channel package declares, when readable. */
+  packageVersion?: string | null
+  /** Version this plugin's sign-in indexes were written against. */
+  packageExpectedVersion?: string
+  packageVersionMismatch?: boolean
+  packageSource?: 'installed' | 'override' | 'magpie-fallback'
   methods: Method[]
   accounts: Account[]
   models: Model[]
@@ -541,6 +547,7 @@ const CSS = `
 .hf-account-main { min-width: 0; }
 .hf-account-top { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
 .hf-channel-note { margin-top: 6px; color: var(--hf-muted); font-size: 11px; line-height: 1.5; }
+.hf-channel-note.warn { color: var(--hf-warning); }
 .hf-account-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .hf-account-meta-info { flex: 1 1 auto; min-width: 0; color: var(--hf-muted); font-size: 11px; line-height: 1.5; }
 .hf-account-actions { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
@@ -2095,6 +2102,14 @@ export function HitchfinSettings() {
                       .join(' · ')
                   : T('尚未登录', 'Not signed in')}
             </div>
+            {channel.packageVersionMismatch ? (
+              <div className="hf-channel-note warn" role="status">
+                {T(
+                  `渠道包版本 ${channel.packageVersion ?? '未知'}，插件按 ${channel.packageExpectedVersion} 适配；登录方式可能不匹配。`,
+                  `Channel package is ${channel.packageVersion ?? 'unknown'}, written against ${channel.packageExpectedVersion}; sign-in methods may not match.`,
+                )}
+              </div>
+            ) : null}
             {channel.packageAvailable && accounts.length > 1 ? (
               <div className="hf-channel-note">
                 {T(

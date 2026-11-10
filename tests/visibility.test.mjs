@@ -178,6 +178,13 @@ async function stateFor(
         exportName: 'Mock',
         provider: 'trae-cn',
       }),
+      packageInfo: () => ({
+        path: '/tmp/mock.mjs',
+        source: 'installed',
+        version: '0.0.0',
+        expectedVersion: descriptor.packageVersion,
+        versionMatches: false,
+      }),
       get: (provider) => (provider === descriptor.providerId ? descriptor : undefined),
       providerIds: () => [descriptor.providerId],
     },
@@ -213,6 +220,14 @@ test('/state hides the name group and reports canonical hidden names', async () 
   assert.deepEqual(channel.hiddenModels, [NAME.toLowerCase()])
   assert.equal(channel.allModels.some((m) => m.name === NAME), true)
   assert.equal(channel.freeMetadataExpected, false)
+})
+
+test('/state reports the installed channel package version and any mismatch', async () => {
+  const channel = await stateFor([])
+  assert.equal(channel.packageVersion, '0.0.0')
+  assert.equal(channel.packageExpectedVersion, descriptor.packageVersion)
+  assert.equal(channel.packageVersionMismatch, true)
+  assert.equal(channel.packageSource, 'installed')
 })
 
 test('/state does not query or list a disabled account', async () => {
