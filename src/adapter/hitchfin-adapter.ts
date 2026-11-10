@@ -3,6 +3,7 @@ import { createAnthropicSseTransport } from './anthropic-sse.js'
 import { selectTransportProtocol, type TransportProtocol } from './protocol.js'
 import { HitchfinError, errorMessage } from '../errors.js'
 import { dedupeModels, selectVisibleModels } from '../models.js'
+import { sortAccountsByPriority } from '../accounts/store.js'
 import type { AccountStore, AccountPayload } from '../accounts/store.js'
 import type { ChannelDescriptor } from '../channels/descriptor.js'
 import type { ChannelRegistry } from '../channels/registry.js'
@@ -136,6 +137,8 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
   private readonly protocols = new Map<string, TransportProtocol>()
   /** provider + model -> account ids that actually expose the model. */
   private readonly modelAccounts = new Map<string, Set<string>>()
+  /** provider + account -> timestamp of the last successful stream (in memory). */
+  private readonly lastUsed = new Map<string, number>()
   /** providers whose last model listing had a partial account failure. */
   private readonly incompleteProviders = new Set<string>()
 
@@ -238,10 +241,39 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
     const key = conversationKey(provider, model, sessionId)
     this.sticky.delete(key)
     this.sticky.set(key, accountId)
+    this.lastUsed.set(accountRouteKey(provider, accountId), Date.now())
     if (this.sticky.size > 200) {
       const oldest = this.sticky.keys().next().value
       if (oldest !== undefined) this.sticky.delete(oldest)
     }
+  }
+
+  /** Observable routing state for one account, used by the settings page. */
+  accountStatus(
+    provider: string,
+    accountId: string,
+  ): { lastUsedAt?: number; cooldownUntil?: number; cooldownCode?: string } {
+    const now = Date.now()
+    const key = accountRouteKey(provider, accountId)
+    const out: { lastUsedAt?: number; cooldownUntil?: number; cooldownCode?: string } = {}
+    const used = this.lastUsed.get(key)
+    if (used !== undefined) out.lastUsedAt = used
+    let until = 0
+    let code = ''
+    for (const [stateKey, state] of this.cooldowns) {
+      if (state.until <= now) continue
+      if (stateKey === key || stateKey.startsWith(`${key}\0`)) {
+        if (state.until > until) {
+          until = state.until
+          code = state.code
+        }
+      }
+    }
+    if (until > 0) {
+      out.cooldownUntil = until
+      out.cooldownCode = code
+    }
+    return out
   }
 
   private async protocolFor(provider: string, model: string): Promise<TransportProtocol> {
@@ -310,10 +342,10 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
     }
 
     try {
-      const accounts = await this.options.accounts.list(descriptor.id)
+      const accounts = sortAccountsByPriority(await this.options.accounts.list(descriptor.id))
       const sources: readonly Pick<
         AccountPayload,
-        'accountId' | 'auth' | 'freeOnly' | 'hiddenModels' | 'proxy'
+        'accountId' | 'auth' | 'freeOnly' | 'hiddenModels' | 'proxy' | 'enabled'
       >[] =
         accounts.length > 0
           ? accounts
@@ -357,7 +389,7 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
           )
         }
         for (const model of selection.candidates) {
-          if (account.auth !== undefined) {
+          if (account.auth !== undefined && account.enabled !== false) {
             let owners = ownersByModel.get(model.id)
             if (!owners) {
               owners = new Set()
@@ -492,21 +524,28 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
 
     let accountList: readonly AccountPayload[] = []
     try {
-      accountList = await this.options.accounts.list(descriptor.id)
+      accountList = sortAccountsByPriority(await this.options.accounts.list(descriptor.id))
     } catch (error) {
       this.options.logger.warn(
         `dsh-hitchfin: reading accounts for ${descriptor.displayName} failed: ${errorMessage(error)}`,
       )
     }
 
-    const signedIn = accountList.filter((entry) => entry.auth !== undefined)
+    const signedIn = accountList.filter(
+      (entry) => entry.auth !== undefined && entry.enabled !== false,
+    )
     if (signedIn.length === 0) {
+      const allDisabled = accountList.some(
+        (entry) => entry.auth !== undefined && entry.enabled === false,
+      )
       yield {
         type: 'finish',
         reason: {
           kind: 'error',
           failure: {
-            message: `Sign in to ${descriptor.displayName} before using this model`,
+            message: allDisabled
+              ? `No enabled account for ${descriptor.displayName}; enable one in Settings`
+              : `Sign in to ${descriptor.displayName} before using this model`,
             code: 'AUTH',
           },
         },

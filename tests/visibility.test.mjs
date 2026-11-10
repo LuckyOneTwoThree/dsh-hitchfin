@@ -181,7 +181,12 @@ async function stateFor(hiddenTokens) {
       apiKey: async () => ({ auth: {} }),
       cancelAuth() {},
     },
-    adapter: { invalidate() {}, forget() {}, listModels: async () => [] },
+    adapter: {
+      invalidate() {},
+      forget() {},
+      listModels: async () => [],
+      accountStatus: () => ({}),
+    },
   }
   const cleanup = registerHitchfinRoutes(ctx, services)
   const res = makeRes()

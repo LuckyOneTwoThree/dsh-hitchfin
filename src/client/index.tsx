@@ -24,6 +24,12 @@ interface Account {
   proxy?: string
   proxyConfigured?: boolean
   error?: string
+  enabled?: boolean
+  priority?: number | null
+  isPrimary?: boolean
+  lastUsedAt?: number
+  cooldownUntil?: number
+  cooldownCode?: string
 }
 
 interface Model {
@@ -531,7 +537,11 @@ const CSS = `
 }
 .hf-account:last-child { border-bottom: 0; }
 .hf-account-main { min-width: 0; }
-.hf-account-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.hf-account-top { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.hf-account-hint { color: var(--hf-muted); font-size: 11px; line-height: 1.5; padding-bottom: 4px; }
+.hf-account-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.hf-account-meta-info { flex: 1 1 auto; min-width: 0; color: var(--hf-muted); font-size: 11px; line-height: 1.5; }
+.hf-account-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 .hf-dot {
   flex: 0 0 auto;
   width: 6px;
@@ -1066,6 +1076,28 @@ function visibleModels(channel: Channel): Model[] {
   )
 }
 
+function withPrimary(accounts: Account[]): Account[] {
+  const primaryIndex = accounts.findIndex((account) => account.enabled !== false)
+  return accounts.map((account, index) => ({ ...account, isPrimary: index === primaryIndex }))
+}
+
+function timeAgo(ts: number | undefined, now: number): string {
+  if (!ts) return ''
+  const seconds = Math.max(0, Math.floor((now - ts) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`
+  return `${Math.floor(seconds / 86400)}d`
+}
+
+function cooldownLeft(until: number | undefined, now: number): string {
+  if (!until || until <= now) return ''
+  const seconds = Math.ceil((until - now) / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  return seconds % 60 ? `${minutes}m ${seconds % 60}s` : `${minutes}m`
+}
+
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
@@ -1251,6 +1283,7 @@ export function HitchfinSettings() {
   const [modelQuery, setModelQuery] = useState('')
   const [modelBusy, setModelBusy] = useState(false)
   const [quotaReady, setQuotaReady] = useState(false)
+  const [now, setNow] = useState(Date.now())
   const [toast, setToast] = useState<Toast | null>(null)
   const [dark, setDark] = useState(detectDark)
   const toastTimer = useRef<number | null>(null)
@@ -1272,6 +1305,23 @@ export function HitchfinSettings() {
       if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
     }
   }, [])
+
+  // Only tick while an account is cooling down, and stop on its own.
+  useEffect(() => {
+    const hasCooldown = channels?.some((channel) =>
+      channel.accounts.some((account) => (account.cooldownUntil ?? 0) > Date.now()),
+    )
+    if (!hasCooldown) return
+    const timer = window.setInterval(() => {
+      const current = Date.now()
+      setNow(current)
+      const stillActive = channels?.some((channel) =>
+        channel.accounts.some((account) => (account.cooldownUntil ?? 0) > current),
+      )
+      if (!stillActive) window.clearInterval(timer)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [channels])
 
   useEffect(() => {
     const root = document.documentElement
@@ -1659,6 +1709,78 @@ export function HitchfinSettings() {
     // Drop both the canonical name and any legacy id so a toggle always flips.
     const cleaned = previous.filter((token) => token !== key && token !== model.id)
     void persistHidden(target, wasHidden ? cleaned : [...cleaned, key], previous)
+  }
+
+  const persistEnabled = async (target: Channel, accountId: string, enabled: boolean) => {
+    if (busy !== '') return
+    const apply = (value: boolean) => (list: Channel[] | null) =>
+      list
+        ? list.map((entry) =>
+            entry.id === target.id
+              ? {
+                  ...entry,
+                  accounts: withPrimary(
+                    entry.accounts.map((account) =>
+                      account.accountId === accountId
+                        ? { ...account, enabled: value }
+                        : account,
+                    ),
+                  ),
+                }
+              : entry,
+          )
+        : list
+    setChannels(apply(enabled))
+    setBusy(`enabled:${accountId}`)
+    try {
+      await json('/dsh-hitchfin/account/enabled', {
+        method: 'POST',
+        body: JSON.stringify({ channelId: target.id, accountId, enabled }),
+      })
+      showToast(
+        'success',
+        enabled
+          ? T('账号已启用', 'Account enabled')
+          : T('账号已停用，凭据与设置已保留', 'Account disabled; credentials kept'),
+      )
+    } catch (err) {
+      setChannels(apply(!enabled))
+      showToast('error', err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const persistOrder = async (target: Channel, ordered: Account[], previous: Account[]) => {
+    if (busy !== '') return
+    const replace = (accounts: Account[]) => (list: Channel[] | null) =>
+      list
+        ? list.map((entry) => (entry.id === target.id ? { ...entry, accounts } : entry))
+        : list
+    setChannels(replace(withPrimary(ordered)))
+    setBusy('order')
+    try {
+      await json('/dsh-hitchfin/account/order', {
+        method: 'POST',
+        body: JSON.stringify({
+          channelId: target.id,
+          accountIds: ordered.map((account) => account.accountId),
+        }),
+      })
+    } catch (err) {
+      setChannels(replace(previous))
+      showToast('error', err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const moveAccount = (target: Channel, index: number, delta: number) => {
+    const next = index + delta
+    if (next < 0 || next >= target.accounts.length) return
+    const ordered = [...target.accounts]
+    ;[ordered[index], ordered[next]] = [ordered[next], ordered[index]]
+    void persistOrder(target, ordered, target.accounts)
   }
 
   const showAllModels = (target: Channel) => {
@@ -2161,7 +2283,13 @@ export function HitchfinSettings() {
 
         {accounts.length > 0 ? (
           <div className="hf-accounts">
-            {accounts.map((account) => {
+            <div className="hf-account-hint">
+              {T(
+                '主账号优先；同一会话沿用上次成功的账号以保留上下文缓存，失败时按列表顺序自动切换。',
+                'Primary first; a session keeps its last successful account for cache locality, then fails over in list order.',
+              )}
+            </div>
+            {accounts.map((account, accountIndex) => {
               const key = `${channel.id}:${account.accountId}`
               const rows = quotaRows(account.quota)
               const menuOpen = menuFor === key
@@ -2177,6 +2305,13 @@ export function HitchfinSettings() {
                         {account.label}
                       </span>
                       <span className="hf-account-id">{account.accountId}</span>
+                      {account.enabled === false ? (
+                        <span className="hf-mini-tag warn">{T('已停用', 'Disabled')}</span>
+                      ) : account.isPrimary ? (
+                        <span className="hf-mini-tag">{T('主账号', 'Primary')}</span>
+                      ) : (
+                        <span className="hf-mini-tag">{T('备用', 'Backup')}</span>
+                      )}
                       {account.quota?.plan ? (
                         <span className="hf-account-plan">{account.quota.plan}</span>
                       ) : null}
@@ -2226,6 +2361,57 @@ export function HitchfinSettings() {
                         {quotaReady ? T('额度暂不可用', 'Usage unavailable') : T('正在读取额度…', 'Loading usage…')}
                       </div>
                     )}
+                    <div className="hf-account-meta">
+                      <span className="hf-account-meta-info">
+                        {account.lastUsedAt
+                          ? `${T('最近使用', 'Last used')} ${timeAgo(account.lastUsedAt, now)}`
+                          : T('尚未使用', 'Not used yet')}
+                        {cooldownLeft(account.cooldownUntil, now)
+                          ? ` · ${T('冷却', 'Cooldown')} ${cooldownLeft(account.cooldownUntil, now)}${
+                              account.cooldownCode ? ` (${account.cooldownCode})` : ''
+                            }`
+                          : ''}
+                      </span>
+                      <span className="hf-account-actions">
+                        <button
+                          type="button"
+                          className="hf-mini-btn"
+                          aria-pressed={account.enabled !== false}
+                          disabled={busy !== ''}
+                          title={
+                            account.enabled === false
+                              ? T('启用该账号', 'Enable this account')
+                              : T('停用该账号，凭据与设置会保留', 'Disable; credentials are kept')
+                          }
+                          onClick={() =>
+                            persistEnabled(channel, account.accountId, account.enabled === false)
+                          }
+                        >
+                          <span className={`hf-dot${account.enabled === false ? ' off' : ''}`} />
+                          {account.enabled === false ? T('停用', 'Off') : T('启用', 'On')}
+                        </button>
+                        <button
+                          type="button"
+                          className="hf-icon-btn"
+                          aria-label={T('上移，提高优先级', 'Move up')}
+                          title={T('上移，提高优先级', 'Move up')}
+                          disabled={busy !== '' || accountIndex === 0}
+                          onClick={() => moveAccount(channel, accountIndex, -1)}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          className="hf-icon-btn"
+                          aria-label={T('下移，降低优先级', 'Move down')}
+                          title={T('下移，降低优先级', 'Move down')}
+                          disabled={busy !== '' || accountIndex === accounts.length - 1}
+                          onClick={() => moveAccount(channel, accountIndex, 1)}
+                        >
+                          ↓
+                        </button>
+                      </span>
+                    </div>
                   </div>
 
                   <div className="hf-account-side">

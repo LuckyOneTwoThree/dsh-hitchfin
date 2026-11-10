@@ -3,7 +3,12 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { errorMessage } from './errors.js'
 import { canonicalHiddenNames, dedupeModels, selectVisibleModels } from './models.js'
-import { labelFromAuth, type AccountPayload, type AccountStore } from './accounts/store.js'
+import {
+  labelFromAuth,
+  sortAccountsByPriority,
+  type AccountPayload,
+  type AccountStore,
+} from './accounts/store.js'
 import type { ChannelDescriptor } from './channels/descriptor.js'
 import type { ChannelRegistry } from './channels/registry.js'
 import type { HitchfinAdapter } from './adapter/hitchfin-adapter.js'
@@ -302,6 +307,12 @@ export function registerHitchfinRoutes(
       ...(existing?.plan ? { plan: existing.plan } : {}),
       ...(resolvedHiddenModels ? { hiddenModels: resolvedHiddenModels } : {}),
       ...(resolvedProxy ? { proxy: resolvedProxy } : {}),
+      ...(typeof existing?.enabled === 'boolean' ? { enabled: existing.enabled } : {}),
+      ...(existing
+        ? existing.priority !== undefined
+          ? { priority: existing.priority }
+          : {}
+        : { priority: stored.length, enabled: true }),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     })
@@ -337,7 +348,7 @@ export function registerHitchfinRoutes(
         registry.all().map(async (descriptor) => {
           let accountList: readonly AccountPayload[] = []
           try {
-            accountList = await accounts.list(descriptor.id)
+            accountList = sortAccountsByPriority(await accounts.list(descriptor.id))
           } catch {
             // Keep the channel visible even if the credential store is unreadable.
           }
@@ -458,17 +469,24 @@ export function registerHitchfinRoutes(
                 : true,
             hiddenModels,
             methods: descriptor.authMethods,
-            accounts: views.map((view) =>
-              publicAccount(
+            accounts: views.map((view, index) => ({
+              ...publicAccount(
                 view.account,
                 view.visible.length,
                 withQuota ? view.quota : undefined,
                 view.error,
               ),
-            ),
+              enabled: view.account.enabled !== false,
+              priority: view.account.priority ?? null,
+              isPrimary:
+                view.account.enabled !== false &&
+                index === views.findIndex((item) => item.account.enabled !== false),
+              ...adapter.accountStatus(descriptor.providerId, view.account.accountId),
+            })),
             models,
             allModels,
-            quota: views[0]?.quota ?? null,
+            // Usage belongs to individual accounts; no channel-level aggregate.
+            quota: null,
             modelCount: models.length,
           }
         }),
@@ -706,6 +724,59 @@ export function registerHitchfinRoutes(
       adapter.forget(descriptor.providerId, accountId)
       modelsChanged(descriptor)
       sendJson(res, 200, { ok: true })
+      return
+    }
+
+    if (path === '/account/enabled' && !methodRefused(req, res, ['POST'])) {
+      const body = await readJson(req)
+      const descriptor = descriptorOf(registry, text(body.channelId))
+      if (!descriptor) {
+        sendJson(res, 404, { ok: false, error: 'unknown channel' })
+        return
+      }
+      const accountId = text(body.accountId)
+      if (!accountId) {
+        sendJson(res, 400, { ok: false, error: 'accountId is required' })
+        return
+      }
+      try {
+        await accounts.setEnabled(descriptor.id, accountId, body.enabled !== false)
+        adapter.forget(descriptor.providerId, accountId)
+        modelsChanged(descriptor)
+        sendJson(res, 200, { ok: true })
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: errorMessage(error) })
+      }
+      return
+    }
+
+    if (path === '/account/order' && !methodRefused(req, res, ['POST'])) {
+      const body = await readJson(req)
+      const descriptor = descriptorOf(registry, text(body.channelId))
+      if (!descriptor) {
+        sendJson(res, 404, { ok: false, error: 'unknown channel' })
+        return
+      }
+      const ids = Array.isArray(body.accountIds)
+        ? [
+            ...new Set(
+              body.accountIds
+                .filter((value): value is string => typeof value === 'string' && value.trim() !== '')
+                .map((value) => value.trim()),
+            ),
+          ]
+        : []
+      if (ids.length === 0) {
+        sendJson(res, 400, { ok: false, error: 'accountIds is required' })
+        return
+      }
+      try {
+        await accounts.setPriorities(descriptor.id, ids)
+        adapter.invalidate(descriptor.providerId)
+        sendJson(res, 200, { ok: true })
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: errorMessage(error) })
+      }
       return
     }
 

@@ -11,8 +11,27 @@ export interface AccountPayload {
   hiddenModels?: string[]
   /** Optional HTTP(S) proxy for this account's channel requests. */
   proxy?: string
+  /** Disabled accounts keep their data but never take part in routing. */
+  enabled?: boolean
+  /** Lower value means higher priority; missing values fall back to id order. */
+  priority?: number
   createdAt: number
   updatedAt: number
+}
+
+/**
+ * Deterministic account order: explicit priority first, then account id.
+ * Old records without priority no longer depend on the host's record order.
+ */
+export function sortAccountsByPriority<T extends Pick<AccountPayload, 'accountId' | 'priority'>>(
+  accounts: readonly T[],
+): T[] {
+  return [...accounts].sort((left, right) => {
+    const lp = left.priority ?? Number.MAX_SAFE_INTEGER
+    const rp = right.priority ?? Number.MAX_SAFE_INTEGER
+    if (lp !== rp) return lp - rp
+    return left.accountId.localeCompare(right.accountId)
+  })
 }
 
 export type AccountAuth = unknown
@@ -61,6 +80,10 @@ function parsePayload(record: CredentialRecord | undefined): AccountPayload | un
       : {}),
     ...(typeof candidate.proxy === 'string' && candidate.proxy.trim()
       ? { proxy: candidate.proxy.trim() }
+      : {}),
+    ...(typeof candidate.enabled === 'boolean' ? { enabled: candidate.enabled } : {}),
+    ...(typeof candidate.priority === 'number' && Number.isFinite(candidate.priority)
+      ? { priority: candidate.priority }
       : {}),
     createdAt: typeof candidate.createdAt === 'number' ? candidate.createdAt : Date.now(),
     updatedAt: typeof candidate.updatedAt === 'number' ? candidate.updatedAt : Date.now(),
@@ -129,6 +152,28 @@ export class AccountStore {
     const accounts = await this.list(channelId)
     for (const account of accounts) {
       await this.setHiddenModels(channelId, account.accountId, hidden)
+    }
+  }
+
+  async setEnabled(channelId: string, accountId: string, enabled: boolean): Promise<void> {
+    await this.update(channelId, accountId, (current) => ({ ...current, enabled }))
+  }
+
+  /** Persist the visible account order as explicit priorities. */
+  async setPriorities(channelId: string, orderedIds: readonly string[]): Promise<void> {
+    const existing = await this.list(channelId)
+    const known = new Set(existing.map((account) => account.accountId))
+    const rank = new Map<string, number>()
+    orderedIds.forEach((id, index) => {
+      if (known.has(id) && !rank.has(id)) rank.set(id, index)
+    })
+    for (const account of existing) {
+      const next = rank.get(account.accountId)
+      if (next === undefined) continue
+      await this.update(channelId, account.accountId, (current) => ({
+        ...current,
+        priority: next,
+      }))
     }
   }
 
