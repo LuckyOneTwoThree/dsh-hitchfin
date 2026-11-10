@@ -7,6 +7,7 @@ export interface AccountPayload {
   auth: unknown
   plan?: string
   freeOnly: boolean
+  /** Canonical model names; older records may still contain model ids. */
   hiddenModels?: string[]
   /** Optional HTTP(S) proxy for this account's channel requests. */
   proxy?: string

@@ -2,7 +2,7 @@ import { createOpenAiSseTransport } from './openai-sse.js'
 import { createAnthropicSseTransport } from './anthropic-sse.js'
 import { selectTransportProtocol, type TransportProtocol } from './protocol.js'
 import { HitchfinError, errorMessage } from '../errors.js'
-import { dedupeModels } from '../models.js'
+import { dedupeModels, selectVisibleModels } from '../models.js'
 import type { AccountStore, AccountPayload } from '../accounts/store.js'
 import type { ChannelDescriptor } from '../channels/descriptor.js'
 import type { ChannelRegistry } from '../channels/registry.js'
@@ -341,24 +341,22 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
           )
           continue
         }
-        const hidden = new Set(account.hiddenModels ?? [])
-        const hasFreeMetadata = models.some((model) => model.freeKnown)
-        const usable =
-          account.freeOnly !== false && hasFreeMetadata
-            ? models.filter((model) => model.freeKnown && model.free)
-            : models
+        const selection = selectVisibleModels(
+          models,
+          new Set(account.hiddenModels ?? []),
+          account.freeOnly !== false,
+        )
         if (
           account.freeOnly !== false &&
-          hasFreeMetadata &&
-          usable.length === 0 &&
+          selection.hasFreeMetadata &&
+          selection.candidates.length === 0 &&
           models.length > 0
         ) {
           this.options.logger.warn(
             `dsh-hitchfin: ${descriptor.displayName} has no free model available; hiding ${models.length} model(s) under free-only`,
           )
         }
-        for (const model of usable) {
-          if (hidden.has(model.id)) continue
+        for (const model of selection.candidates) {
           if (account.auth !== undefined) {
             let owners = ownersByModel.get(model.id)
             if (!owners) {

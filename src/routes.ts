@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { errorMessage } from './errors.js'
-import { dedupeModels } from './models.js'
+import { canonicalHiddenNames, dedupeModels, selectVisibleModels } from './models.js'
 import { labelFromAuth, type AccountPayload, type AccountStore } from './accounts/store.js'
 import type { ChannelDescriptor } from './channels/descriptor.js'
 import type { ChannelRegistry } from './channels/registry.js'
@@ -378,21 +378,26 @@ export function registerHitchfinRoutes(
                 }
               }
 
-              const hidden = new Set(account.hiddenModels ?? [])
-              const hasFreeMetadata = raw.some((model) => model.freeKnown)
-              const usable =
-                account.freeOnly !== false && hasFreeMetadata
-                  ? raw.filter((model) => model.freeKnown && model.free)
-                  : raw
-              const visible = dedupeModels(usable).filter((model) => !hidden.has(model.id))
-              return { account, raw, visible, quota, error }
+              const selection = selectVisibleModels(
+                raw,
+                new Set(account.hiddenModels ?? []),
+                account.freeOnly !== false,
+              )
+              return {
+                account,
+                raw,
+                visible: selection.models,
+                candidates: selection.candidates,
+                quota,
+                error,
+              }
             }),
           )
 
           const mergedVisible = new Map<string, ChannelModelRecord>()
           const mergedAll = new Map<string, ChannelModelRecord>()
           for (const view of views) {
-            for (const model of view.visible) {
+            for (const model of view.candidates) {
               const existing = mergedVisible.get(model.id)
               if (!existing || (model.freeKnown && model.free && !existing.free)) {
                 mergedVisible.set(model.id, model)
@@ -435,14 +440,10 @@ export function registerHitchfinRoutes(
             }
           }
 
-          let hiddenModels: string[] = []
-          if (accountList.length > 0) {
-            hiddenModels = [...(accountList[0].hiddenModels ?? [])]
-            for (const account of accountList.slice(1)) {
-              const hidden = new Set(account.hiddenModels ?? [])
-              hiddenModels = hiddenModels.filter((id) => hidden.has(id))
-            }
-          }
+          const hiddenModels = canonicalHiddenNames(
+            mergedAll,
+            accountList.map((account) => account.hiddenModels ?? []),
+          )
 
           return {
             id: descriptor.id,

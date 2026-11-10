@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { QODER_LOGO, TRAE_LOGO, WORKBUDDY_LOGO } from './logos.js'
+import { isModelHidden, normalizedModelName } from '../models.js'
 
 export const name = 'dsh-hitchfin'
 
@@ -1061,7 +1062,7 @@ function visibleModels(channel: Channel): Model[] {
   const hidden = new Set(channel.hiddenModels ?? [])
   const freeFilter = channel.freeOnly && channel.freeStatusKnown
   return (channel.allModels ?? []).filter(
-    (model) => !hidden.has(model.id) && (!freeFilter || model.free),
+    (model) => !isModelHidden(model, hidden) && (!freeFilter || model.free),
   )
 }
 
@@ -1392,7 +1393,9 @@ export function HitchfinSettings() {
   const visibleList = channel ? visibleModels(channel) : []
   const visibleTotal = visibleList.length
   const hiddenSet = new Set(channel?.hiddenModels ?? [])
-  const hiddenCount = channel ? channel.allModels.filter((model) => hiddenSet.has(model.id)).length : 0
+  const hiddenCount = channel
+    ? channel.allModels.filter((model) => isModelHidden(model, hiddenSet)).length
+    : 0
   const channelLogin = login && channel && login.channelId === channel.id ? login : null
   const loginPending = Boolean(
     channelLogin && (channelLogin.status === 'pending' || channelLogin.status === 'code'),
@@ -1651,10 +1654,11 @@ export function HitchfinSettings() {
 
   const toggleModel = (target: Channel, model: Model) => {
     const previous = [...(target.hiddenModels ?? [])]
-    const next = previous.includes(model.id)
-      ? previous.filter((id) => id !== model.id)
-      : [...previous, model.id]
-    void persistHidden(target, next, previous)
+    const key = normalizedModelName(model.name)
+    const wasHidden = isModelHidden(model, new Set(previous))
+    // Drop both the canonical name and any legacy id so a toggle always flips.
+    const cleaned = previous.filter((token) => token !== key && token !== model.id)
+    void persistHidden(target, wasHidden ? cleaned : [...cleaned, key], previous)
   }
 
   const showAllModels = (target: Channel) => {
@@ -1668,7 +1672,7 @@ export function HitchfinSettings() {
         ...previous,
         ...target.allModels
           .filter((model) => model.freeKnown === true && !model.free)
-          .map((model) => model.id),
+          .map((model) => normalizedModelName(model.name)),
       ]),
     ]
     if (next.length === previous.length) {
@@ -2604,7 +2608,7 @@ export function HitchfinSettings() {
                 {shownModels.length > 0 ? (
                   <div className="hf-model-grid">
                     {shownModels.map((model) => {
-                      const hidden = hiddenSet.has(model.id)
+                      const hidden = isModelHidden(model, hiddenSet)
                       const filteredByFree =
                         channel.freeOnly &&
                         channel.freeStatusKnown &&
