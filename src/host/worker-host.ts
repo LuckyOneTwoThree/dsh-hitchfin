@@ -40,9 +40,15 @@ export interface ChannelUsageRecord {
   balance?: string
   windows?: readonly {
     name: string
+    /** Share used, in percent. */
     used?: number
-    resetsAt?: string
+    /** Count used of `limit`, in `unit` — the vendor's own numbers. */
+    amount?: number
+    limit?: number
+    unit?: string
+    /** A number format the vendor already wrote, e.g. "200.0M / 200M". */
     display?: string
+    resetsAt?: string
     free?: boolean
   }[]
   [key: string]: unknown

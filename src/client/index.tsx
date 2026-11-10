@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { QODER_LOGO, TRAE_LOGO, WORKBUDDY_LOGO } from './logos.js'
 import { isModelHidden, normalizedModelName } from '../models.js'
+import { quotaPercent, quotaValue, type QuotaWindowLike } from '../format.js'
 
 export const name = 'dsh-hitchfin'
 
@@ -39,12 +40,8 @@ interface Model {
   freeKnown?: boolean
 }
 
-interface QuotaWindow {
+interface QuotaWindow extends QuotaWindowLike {
   name: string
-  used?: number
-  display?: string
-  resetsAt?: string
-  free?: boolean
 }
 
 interface Quota {
@@ -336,6 +333,8 @@ const CSS = `
   font-weight: 550;
   white-space: nowrap;
 }
+.hf-mini-tag.primary { background: var(--hf-brand-soft); color: var(--hf-brand); }
+.hf-mini-tag.plan { background: transparent; box-shadow: inset 0 0 0 1px var(--hf-border); color: var(--hf-muted); }
 .hf-mini-tag.warn { background: rgba(148, 98, 0, .1); color: var(--hf-warning); }
 .hf-channel-meta {
   margin-top: 2px;
@@ -531,17 +530,19 @@ const CSS = `
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px 12px;
-  padding: 13px 0;
+  gap: 10px 14px;
+  padding: 15px 0;
   border-bottom: 1px solid var(--hf-border);
 }
 .hf-account:last-child { border-bottom: 0; }
+.hf-account.off .hf-account-main { opacity: .62; }
 .hf-account-main { min-width: 0; }
 .hf-account-top { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
-.hf-account-hint { color: var(--hf-muted); font-size: 11px; line-height: 1.5; padding-bottom: 4px; }
+.hf-channel-note { margin-top: 6px; color: var(--hf-muted); font-size: 11px; line-height: 1.5; }
 .hf-account-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .hf-account-meta-info { flex: 1 1 auto; min-width: 0; color: var(--hf-muted); font-size: 11px; line-height: 1.5; }
-.hf-account-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.hf-account-actions { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+.hf-account-actions .hf-mini-btn { min-height: 24px; padding: 0 6px; }
 .hf-dot {
   flex: 0 0 auto;
   width: 6px;
@@ -566,25 +567,26 @@ const CSS = `
   font-size: 11px;
   letter-spacing: -.02em;
 }
-.hf-account-plan {
-  flex: 0 0 auto;
-  color: var(--hf-muted);
-  font-size: 11px;
-  font-weight: 550;
-}
-.hf-account-plan::before { content: "·"; margin-right: 6px; color: var(--hf-faint); }
-.hf-quotas { margin-top: 7px; display: flex; flex-direction: column; gap: 7px; }
-.hf-quota { max-width: 520px; }
+.hf-quotas { margin-top: 8px; display: flex; flex-direction: column; gap: 9px; }
 .hf-quota-line {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
-  color: var(--hf-muted);
   font-size: 11px;
   line-height: 1.4;
 }
-.hf-quota-label { display: inline-flex; align-items: center; gap: 5px; font-weight: 550; color: var(--hf-text-2); }
+.hf-quota-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 550;
+  color: var(--hf-text-2);
+}
 .hf-quota-free {
   display: inline-flex;
   align-items: center;
@@ -596,11 +598,18 @@ const CSS = `
   font-size: 11px;
   font-weight: 600;
 }
-.hf-quota-value { min-width: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.hf-quota-reset { color: var(--hf-muted); }
+.hf-quota-value {
+  flex: 0 0 auto;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--hf-text);
+  font-variant-numeric: tabular-nums;
+}
+.hf-quota-amount { font-weight: 600; letter-spacing: -.01em; }
+.hf-quota-reset { color: var(--hf-muted); font-weight: 400; }
 .hf-progress {
-  height: 4px;
-  margin-top: 5px;
+  height: 5px;
+  margin-top: 6px;
   overflow: hidden;
   border-radius: 999px;
   background: var(--hf-bg-sunken);
@@ -613,6 +622,8 @@ const CSS = `
   transition: width .35s cubic-bezier(.2, .8, .2, 1);
 }
 .hf-progress.free > span { background: var(--hf-success); }
+.hf-progress.warn > span { background: var(--hf-warning); }
+.hf-progress.full > span { background: var(--hf-danger); }
 .hf-account-sub { margin-top: 3px; color: var(--hf-muted); font-size: 11px; line-height: 1.45; }
 .hf-account-error {
   display: flex;
@@ -635,7 +646,62 @@ const CSS = `
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.hf-account-side { display: flex; align-items: flex-start; gap: 4px; }
+.hf-account-side { display: flex; align-items: flex-start; gap: 6px; }
+.hf-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 20px;
+  margin-top: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--hf-bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--hf-border);
+  cursor: pointer;
+  transition: background .18s ease, box-shadow .18s ease;
+}
+.hf-switch:hover:not(:disabled) { box-shadow: inset 0 0 0 1px var(--hf-border-strong); }
+.hf-switch.on { background: var(--hf-brand); box-shadow: inset 0 0 0 1px transparent; }
+.hf-switch-knob {
+  position: absolute;
+  top: 2.5px;
+  left: 2.5px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .22);
+  transition: transform .18s cubic-bezier(.2, .8, .2, 1);
+}
+.hf-switch.on .hf-switch-knob { transform: translateX(14px); }
+.hf-switch:disabled { opacity: .4; cursor: default; }
+.hf-reorder {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  border: 1px solid var(--hf-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.hf-reorder button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--hf-muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.hf-reorder button + button { border-left: 1px solid var(--hf-border); }
+.hf-reorder button:hover:not(:disabled) { background: var(--hf-hover); color: var(--hf-text); }
+.hf-reorder button:disabled { opacity: .3; cursor: default; }
 .hf-mini-btn {
   display: inline-flex;
   align-items: center;
@@ -954,12 +1020,16 @@ const CSS = `
   .hf-channel-actions { width: 100%; margin-top: 2px; }
   .hf-channel-actions .hf-btn { width: 100%; }
   .hf-account { grid-template-columns: minmax(0, 1fr); }
-  .hf-account-side { justify-content: flex-end; margin-top: -4px; }
+  .hf-account-main { padding-right: 42px; }
+  .hf-account-side { position: absolute; top: 14px; right: 0; margin-top: 0; }
   .hf-prefs { grid-template-columns: 1fr; }
   .hf-pref + .hf-pref { border-top: 1px solid var(--hf-border); border-left: 0; }
   .hf-model-grid { grid-template-columns: 1fr; }
   .hf-menu { top: 38px; }
-  .hf-quota-line { align-items: flex-start; }
+  .hf-quota-line { flex-wrap: wrap; gap: 2px 12px; }
+  .hf-quota-value { width: 100%; text-align: left; white-space: normal; }
+  .hf-quota-amount { white-space: nowrap; }
+  .hf-account-actions { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   .hf-wrap *, .hf-wrap *::before, .hf-wrap *::after {
@@ -990,10 +1060,18 @@ function detectDark(): boolean {
   return typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches
 }
 
-function formatReset(value?: string): string {
+function formatReset(value?: string, now?: number): string {
   if (!value) return ''
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
+  if (now !== undefined) {
+    const dayStart = (input: Date) =>
+      new Date(input.getFullYear(), input.getMonth(), input.getDate()).getTime()
+    const days = Math.round((dayStart(date) - dayStart(new Date(now))) / 86_400_000)
+    if (days === 0) return T('今天', 'today')
+    if (days === 1) return T('明天', 'tomorrow')
+    if (days === 2) return T('后天', 'in two days')
+  }
   return date.toLocaleDateString(isZh() ? 'zh-CN' : 'en-US', {
     month: 'short',
     day: 'numeric',
@@ -1036,32 +1114,20 @@ function loginPrompt(channel: Channel, login: Login): string {
   return T('正在等待浏览器完成登录…', 'Waiting for the browser sign-in…')
 }
 
-function parsePercent(display: string): number | undefined {
-  const match = display.match(/([\d,.]+)\s*\/\s*([\d,.]+)/)
-  if (!match) return undefined
-  const used = Number(match[1].replace(/,/g, ''))
-  const total = Number(match[2].replace(/,/g, ''))
-  if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) return undefined
-  return Math.max(0, Math.min(100, Math.round((used / total) * 100)))
-}
-
-function quotaRows(quota?: Quota | null): QuotaRow[] {
+function quotaRows(quota: Quota | null | undefined, now: number): QuotaRow[] {
   if (!quota) return []
   const windows = quota.windows ?? []
   const rows: QuotaRow[] = []
   windows.slice(0, 2).forEach((window, index) => {
-    const raw = window.display ?? (window.used !== undefined ? String(window.used) : '')
-    if (!raw) return
-    const stripped =
-      window.name && raw.startsWith(`${window.name}:`)
-        ? raw.slice(window.name.length + 1).trim()
-        : raw
+    const value = quotaValue(window)
+    if (!value) return
+    const percent = quotaPercent(window)
     rows.push({
       key: `${window.name || 'quota'}-${index}`,
       label: window.name || T('额度', 'Usage'),
-      value: stripped,
-      ...(parsePercent(raw) !== undefined ? { percent: parsePercent(raw) } : {}),
-      ...(window.resetsAt ? { reset: formatReset(window.resetsAt) } : {}),
+      value,
+      ...(percent !== undefined ? { percent: Math.round(percent) } : {}),
+      ...(window.resetsAt ? { reset: formatReset(window.resetsAt, now) } : {}),
       ...(window.free ? { free: true } : {}),
     })
   })
@@ -2019,12 +2085,19 @@ export function HitchfinSettings() {
                   ? [
                       T(`${accounts.length} 个账号`, `${accounts.length} account(s)`),
                       T(`${visibleTotal} 个可用模型`, `${visibleTotal} available model(s)`),
-                      accounts.length > 1 ? T('自动故障转移', 'Auto failover') : '',
                     ]
                       .filter(Boolean)
                       .join(' · ')
                   : T('尚未登录', 'Not signed in')}
             </div>
+            {channel.packageAvailable && accounts.length > 1 ? (
+              <div className="hf-channel-note">
+                {T(
+                  '主账号优先；同会话沿用上次成功的账号以复用缓存，失败时按顺序切换。',
+                  'Primary first; a session sticks to its last account for cache reuse, then fails over in list order.',
+                )}
+              </div>
+            ) : null}
           </div>
           {channel.packageAvailable && accounts.length > 0 ? (
             <div className="hf-channel-actions">
@@ -2283,21 +2356,25 @@ export function HitchfinSettings() {
 
         {accounts.length > 0 ? (
           <div className="hf-accounts">
-            <div className="hf-account-hint">
-              {T(
-                '主账号优先；同一会话沿用上次成功的账号以保留上下文缓存，失败时按列表顺序自动切换。',
-                'Primary first; a session keeps its last successful account for cache locality, then fails over in list order.',
-              )}
-            </div>
             {accounts.map((account, accountIndex) => {
               const key = `${channel.id}:${account.accountId}`
-              const rows = quotaRows(account.quota)
+              const rows = quotaRows(account.quota, now)
+              // A plan named after the very window below it says nothing twice.
+              const plan = account.quota?.plan?.trim()
+              const planLabel =
+                plan && !rows.some((row) => row.label.trim().toLowerCase() === plan.toLowerCase())
+                  ? plan
+                  : ''
+              const cooldown = cooldownLeft(account.cooldownUntil, now)
               const menuOpen = menuFor === key
               const proxyOpen = proxyFor === key
               const deleteBusy = busy === `delete:${key}`
               const proxyBusy = busy === `proxy:${key}`
               return (
-                <div className="hf-account" key={account.accountId}>
+                <div
+                  className={`hf-account${account.enabled === false ? ' off' : ''}`}
+                  key={account.accountId}
+                >
                   <div className="hf-account-main">
                     <div className="hf-account-top">
                       <span className={`hf-dot${account.error ? ' warn' : ''}`} />
@@ -2307,14 +2384,14 @@ export function HitchfinSettings() {
                       <span className="hf-account-id">{account.accountId}</span>
                       {account.enabled === false ? (
                         <span className="hf-mini-tag warn">{T('已停用', 'Disabled')}</span>
-                      ) : account.isPrimary ? (
-                        <span className="hf-mini-tag">{T('主账号', 'Primary')}</span>
-                      ) : (
-                        <span className="hf-mini-tag">{T('备用', 'Backup')}</span>
-                      )}
-                      {account.quota?.plan ? (
-                        <span className="hf-account-plan">{account.quota.plan}</span>
+                      ) : accounts.length > 1 ? (
+                        account.isPrimary ? (
+                          <span className="hf-mini-tag primary">{T('主账号', 'Primary')}</span>
+                        ) : (
+                          <span className="hf-mini-tag">{T('备用', 'Backup')}</span>
+                        )
                       ) : null}
+                      {planLabel ? <span className="hf-mini-tag plan">{planLabel}</span> : null}
                     </div>
                     {account.error ? (
                       <div className="hf-account-error" role="alert">
@@ -2338,8 +2415,15 @@ export function HitchfinSettings() {
                                 {row.label}
                                 {row.free ? <span className="hf-quota-free">{T('免费', 'Free')}</span> : null}
                               </span>
-                              <span className="hf-quota-value">
-                                {row.value}
+                              <span
+                                className="hf-quota-value"
+                                title={
+                                  row.percent !== undefined
+                                    ? T(`已用 ${row.percent}%`, `${row.percent}% used`)
+                                    : undefined
+                                }
+                              >
+                                <span className="hf-quota-amount">{row.value}</span>
                                 {row.reset ? (
                                   <span className="hf-quota-reset">
                                     {' · '}
@@ -2349,7 +2433,19 @@ export function HitchfinSettings() {
                               </span>
                             </div>
                             {row.percent !== undefined ? (
-                              <div className={`hf-progress${row.free ? ' free' : ''}`}>
+                              <div
+                                className={`hf-progress${row.free ? ' free' : ''}${
+                                  row.percent >= 100 ? ' full' : row.percent >= 85 ? ' warn' : ''
+                                }`}
+                                role="progressbar"
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-valuenow={row.percent}
+                                aria-label={T(
+                                  `${row.label} 已用 ${row.percent}%`,
+                                  `${row.label}: ${row.percent}% used`,
+                                )}
+                              >
                                 <span style={{ width: `${row.percent}%` }} />
                               </div>
                             ) : null}
@@ -2366,49 +2462,52 @@ export function HitchfinSettings() {
                         {account.lastUsedAt
                           ? `${T('最近使用', 'Last used')} ${timeAgo(account.lastUsedAt, now)}`
                           : T('尚未使用', 'Not used yet')}
-                        {cooldownLeft(account.cooldownUntil, now)
-                          ? ` · ${T('冷却', 'Cooldown')} ${cooldownLeft(account.cooldownUntil, now)}${
-                              account.cooldownCode ? ` (${account.cooldownCode})` : ''
-                            }`
-                          : ''}
                       </span>
+                      {cooldown ? (
+                        <span className="hf-mini-tag warn">
+                          {T('冷却', 'Cooldown')} {cooldown}
+                          {account.cooldownCode ? ` · ${account.cooldownCode}` : ''}
+                        </span>
+                      ) : null}
                       <span className="hf-account-actions">
+                        <span className="hf-reorder">
+                          <button
+                            type="button"
+                            aria-label={T('上移，提高优先级', 'Move up')}
+                            title={T('上移，提高优先级', 'Move up')}
+                            disabled={busy !== '' || accountIndex === 0}
+                            onClick={() => moveAccount(channel, accountIndex, -1)}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={T('下移，降低优先级', 'Move down')}
+                            title={T('下移，降低优先级', 'Move down')}
+                            disabled={busy !== '' || accountIndex === accounts.length - 1}
+                            onClick={() => moveAccount(channel, accountIndex, 1)}
+                          >
+                            ↓
+                          </button>
+                        </span>
                         <button
                           type="button"
                           className="hf-mini-btn"
-                          aria-pressed={account.enabled !== false}
-                          disabled={busy !== ''}
+                          aria-label={
+                            account.proxyConfigured
+                              ? T('代理已配置，点击修改', 'Proxy configured; click to edit')
+                              : T('未配置代理，点击设置', 'No proxy; click to set')
+                          }
                           title={
-                            account.enabled === false
-                              ? T('启用该账号', 'Enable this account')
-                              : T('停用该账号，凭据与设置会保留', 'Disable; credentials are kept')
+                            account.proxyConfigured
+                              ? T('代理已配置，点击修改', 'Proxy configured; click to edit')
+                              : T('未配置代理，点击设置', 'No proxy; click to set')
                           }
-                          onClick={() =>
-                            persistEnabled(channel, account.accountId, account.enabled === false)
-                          }
+                          disabled={busy !== ''}
+                          onClick={() => openProxy(channel, account)}
                         >
-                          <span className={`hf-dot${account.enabled === false ? ' off' : ''}`} />
-                          {account.enabled === false ? T('停用', 'Off') : T('启用', 'On')}
-                        </button>
-                        <button
-                          type="button"
-                          className="hf-icon-btn"
-                          aria-label={T('上移，提高优先级', 'Move up')}
-                          title={T('上移，提高优先级', 'Move up')}
-                          disabled={busy !== '' || accountIndex === 0}
-                          onClick={() => moveAccount(channel, accountIndex, -1)}
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          className="hf-icon-btn"
-                          aria-label={T('下移，降低优先级', 'Move down')}
-                          title={T('下移，降低优先级', 'Move down')}
-                          disabled={busy !== '' || accountIndex === accounts.length - 1}
-                          onClick={() => moveAccount(channel, accountIndex, 1)}
-                        >
-                          ↓
+                          <span className={`hf-dot${account.proxyConfigured ? '' : ' off'}`} />
+                          {T('代理', 'Proxy')}
                         </button>
                       </span>
                     </div>
@@ -2417,22 +2516,25 @@ export function HitchfinSettings() {
                   <div className="hf-account-side">
                     <button
                       type="button"
-                      className="hf-mini-btn"
+                      role="switch"
+                      aria-checked={account.enabled !== false}
                       aria-label={
-                        account.proxyConfigured
-                          ? T('代理已配置，点击修改', 'Proxy configured; click to edit')
-                          : T('未配置代理，点击设置', 'No proxy; click to set')
+                        account.enabled === false
+                          ? T('启用该账号', 'Enable this account')
+                          : T('停用该账号，凭据与设置会保留', 'Disable; credentials are kept')
                       }
-                      title={
-                        account.proxyConfigured
-                          ? T('代理已配置，点击修改', 'Proxy configured; click to edit')
-                          : T('未配置代理，点击设置', 'No proxy; click to set')
-                      }
+                      className={`hf-switch${account.enabled === false ? '' : ' on'}`}
                       disabled={busy !== ''}
-                      onClick={() => openProxy(channel, account)}
+                      title={
+                        account.enabled === false
+                          ? T('启用该账号', 'Enable this account')
+                          : T('停用该账号，凭据与设置会保留', 'Disable; credentials are kept')
+                      }
+                      onClick={() =>
+                        persistEnabled(channel, account.accountId, account.enabled === false)
+                      }
                     >
-                      <span className={`hf-dot${account.proxyConfigured ? '' : ' off'}`} />
-                      {T('代理', 'Proxy')}
+                      <span className="hf-switch-knob" />
                     </button>
                     <button
                       type="button"
