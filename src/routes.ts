@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { errorMessage } from './errors.js'
 import { canonicalHiddenNames, dedupeModels, selectVisibleModels } from './models.js'
 import {
+  isValidAccountId,
   labelFromAuth,
   sortAccountsByPriority,
   type AccountPayload,
@@ -17,7 +18,7 @@ import type { HitchfinContext, WebRoute } from './types.js'
 
 const PREFIX = '/dsh-hitchfin'
 const BODY_LIMIT = 64 * 1024
-const LOGIN_TTL_MS = 10 * 60_000
+const DEFAULT_LOGIN_TTL_MS = 10 * 60_000
 
 type LoginStatus = 'pending' | 'code' | 'ok' | 'error' | 'cancelled'
 
@@ -66,6 +67,17 @@ function methodRefused(req: IncomingMessage, res: ServerResponse, methods: strin
   return true
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const value = hostname.toLowerCase()
+  return (
+    value === '127.0.0.1' ||
+    value === 'localhost' ||
+    value === 'localhost.' ||
+    value === '::1' ||
+    value === '[::1]'
+  )
+}
+
 function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerResponse): boolean {
   const connection = ctx.get?.('connection') as
     | { requestRejection?: (req: IncomingMessage) => unknown }
@@ -82,6 +94,22 @@ function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerRes
   if (!loopback) {
     sendJson(res, 403, { ok: false, error: 'loopback only' })
     return true
+  }
+
+  // Without the host's Connection fence, validate Host as well: a browser
+  // tricked into resolving an attacker domain to loopback must not reach a
+  // route that trusts "remoteAddress is loopback" alone.
+  if (!connection && typeof req.headers.host === 'string' && req.headers.host.length > 0) {
+    try {
+      const hostname = new URL(`http://${req.headers.host}`).hostname
+      if (!isLoopbackHostname(hostname)) {
+        sendJson(res, 403, { ok: false, error: 'host refused' })
+        return true
+      }
+    } catch {
+      sendJson(res, 403, { ok: false, error: 'host refused' })
+      return true
+    }
   }
 
   const origin = req.headers.origin
@@ -237,11 +265,18 @@ async function resolveAccountId(
   return accountStore.nextAccountId(channelId)
 }
 
+export interface HitchfinRouteOptions {
+  /** Tests shorten this; production keeps the ten-minute login window. */
+  loginTtlMs?: number
+}
+
 export function registerHitchfinRoutes(
   ctx: HitchfinContext,
   services: HitchfinRouteServices,
+  options: HitchfinRouteOptions = {},
 ): () => void {
   const { registry, accounts, worker, adapter } = services
+  const loginTtlMs = options.loginTtlMs ?? DEFAULT_LOGIN_TTL_MS
   const server = ctx.webServer
   if (!server) {
     ctx.logger.warn('dsh-hitchfin: webServer is unavailable; settings routes are disabled')
@@ -254,9 +289,21 @@ export function registerHitchfinRoutes(
   const trackLogin = (state: LoginState): void => {
     logins.set(state.id, state)
     const timer = setTimeout(() => {
-      logins.delete(state.id)
       loginTimers.delete(timer)
-    }, LOGIN_TTL_MS)
+      if (logins.get(state.id) !== state) return
+      // The HTTP state expiring is also the end of the worker-side attempt:
+      // without this the browser/loopback session could stay alive forever and
+      // a late callback could still write an account the UI never saw.
+      if (state.status === 'pending' || state.status === 'code') {
+        state.status = 'cancelled'
+        try {
+          worker.cancelAuth(state.workerSession)
+        } catch {
+          // The worker may already be stopping.
+        }
+      }
+      logins.delete(state.id)
+    }, loginTtlMs)
     timer.unref?.()
     loginTimers.add(timer)
   }
@@ -318,24 +365,23 @@ export function registerHitchfinRoutes(
     })
   }
 
-  let unregister: (() => void) | void
-  void Promise.resolve(
-    server.register({
-      kind: 'prefix',
-      path: PREFIX,
-      handler: (req, res) => {
-        void handle(req, res).catch((error) => {
-          if (!res.headersSent) {
-            sendJson(res, 500, { ok: false, error: errorMessage(error) })
-          } else {
-            res.destroy()
-          }
-        })
-      },
-    }),
-  ).then((fn) => {
-    if (typeof fn === 'function') unregister = fn
+  // `webServer.register` is synchronous and returns its disposer. Resolving it
+  // through a promise used to leave the route registered when disposal ran in
+  // the same tick as registration.
+  const registered = server.register({
+    kind: 'prefix',
+    path: PREFIX,
+    handler: (req, res) => {
+      void handle(req, res).catch((error) => {
+        if (!res.headersSent) {
+          sendJson(res, 500, { ok: false, error: errorMessage(error) })
+        } else {
+          res.destroy()
+        }
+      })
+    },
   })
+  const unregister = typeof registered === 'function' ? registered : undefined
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (fenceRefused(ctx, req, res)) return
@@ -393,6 +439,7 @@ export function registerHitchfinRoutes(
                 raw,
                 new Set(account.hiddenModels ?? []),
                 account.freeOnly !== false,
+                descriptor.supportsFreeWindow,
               )
               return {
                 account,
@@ -463,6 +510,7 @@ export function registerHitchfinRoutes(
             status: descriptor.status,
             packageAvailable,
             freeStatusKnown,
+            freeMetadataExpected: descriptor.supportsFreeWindow,
             freeOnly:
               accountList.length > 0
                 ? accountList.every((entry) => entry.freeOnly !== false)
@@ -512,26 +560,41 @@ export function registerHitchfinRoutes(
       }
       const methodIndex =
         typeof body.method === 'number' && Number.isInteger(body.method) ? body.method : 0
+      const authMethod = descriptor.authMethods.find((entry) => entry.index === methodIndex)
+      // Never fall through to an auth method the product deliberately hid
+      // (WorkBuddy's sealed desktop sign-in is still package index 1).
+      if (!authMethod || authMethod.kind === 'api-key') {
+        sendJson(res, 400, { ok: false, error: 'unknown sign-in method' })
+        return
+      }
       const inputs: Record<string, string> = {}
       if (body.inputs && typeof body.inputs === 'object' && !Array.isArray(body.inputs)) {
         for (const [key, value] of Object.entries(body.inputs).slice(0, 8)) {
           if (typeof value === 'string') inputs[key] = value.slice(0, 4096)
         }
       }
+      const requestedAccountId = text(body.accountId).trim()
+      if (
+        requestedAccountId &&
+        requestedAccountId !== 'new' &&
+        !isValidAccountId(requestedAccountId)
+      ) {
+        sendJson(res, 400, { ok: false, error: 'invalid accountId' })
+        return
+      }
       const parsedProxy = parseProxy(body.proxy)
       if (parsedProxy.error) {
         sendJson(res, 400, { ok: false, error: parsedProxy.error })
         return
       }
-      const accountId = await resolveAccountId(accounts, descriptor.id, body.accountId)
+      const accountId = await resolveAccountId(accounts, descriptor.id, requestedAccountId)
       const existing = await accounts.get(descriptor.id, accountId).catch(() => undefined)
       const proxy = parsedProxy.proxy ?? existing?.proxy
-      const authMethod = descriptor.authMethods.find((entry) => entry.index === methodIndex)
       try {
         const started = await worker.authorize(loadInfo, accountId, methodIndex, inputs, proxy)
         const autoOpened = Boolean(
           started.url &&
-            authMethod?.id === 'browser' &&
+            authMethod.id === 'browser' &&
             (started.opened === true || openExternal(started.url)),
         )
         const state: LoginState = {
@@ -593,8 +656,17 @@ export function registerHitchfinRoutes(
         sendJson(res, 400, { ok: false, error: parsedProxy.error })
         return
       }
+      const requestedAccountId = text(body.accountId).trim()
+      if (
+        requestedAccountId &&
+        requestedAccountId !== 'new' &&
+        !isValidAccountId(requestedAccountId)
+      ) {
+        sendJson(res, 400, { ok: false, error: 'invalid accountId' })
+        return
+      }
       try {
-        const accountId = await resolveAccountId(accounts, descriptor.id, body.accountId)
+        const accountId = await resolveAccountId(accounts, descriptor.id, requestedAccountId)
         const result = await worker.apiKey(loadInfo, accountId, methodIndex, key)
         const account = await saveLoginAccount(
           descriptor,
@@ -653,7 +725,11 @@ export function registerHitchfinRoutes(
         return
       }
       if (state.status === 'pending' || state.status === 'code') {
-        worker.cancelAuth(state.workerSession)
+        try {
+          worker.cancelAuth(state.workerSession)
+        } catch {
+          // The worker may already be stopping; the state still turns cancelled.
+        }
         state.status = 'cancelled'
       }
       sendJson(res, 200, { ok: true, login: publicLogin(state) })

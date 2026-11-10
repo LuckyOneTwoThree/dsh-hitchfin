@@ -21,17 +21,17 @@ const descriptor = {
   fallbackPath: '/tmp/mock-workbuddy.mjs',
 }
 
-function makeRegistry() {
+function makeRegistry(entry = descriptor) {
   return {
-    get: (provider) => (provider === descriptor.providerId ? descriptor : undefined),
+    get: (provider) => (provider === entry.providerId ? entry : undefined),
     loadInfo: () => ({
-      channelId: descriptor.id,
-      packagePath: descriptor.fallbackPath,
-      exportName: descriptor.exportName,
-      provider: descriptor.packageProvider,
+      channelId: entry.id,
+      packagePath: entry.fallbackPath,
+      exportName: entry.exportName,
+      provider: entry.packageProvider,
     }),
-    providerIds: () => [descriptor.providerId],
-    all: () => [descriptor],
+    providerIds: () => [entry.providerId],
+    all: () => [entry],
   }
 }
 
@@ -145,13 +145,19 @@ function collect(stream) {
 
 const logger = { info() {}, warn() {}, error() {} }
 
-function makeAdapter({ accounts = makeAccounts(), worker = makeWorker() } = {}) {
+function makeAdapter({
+  accounts = makeAccounts(),
+  worker = makeWorker(),
+  readImage,
+  registryDescriptor,
+} = {}) {
   return new HitchfinAdapter({
-    registry: makeRegistry(),
+    registry: makeRegistry(registryDescriptor),
     accounts,
     worker,
     logger,
     devSpike: true,
+    ...(readImage ? { readImage } : {}),
   })
 }
 
@@ -170,6 +176,23 @@ test('spike adapter still lists and streams', async () => {
     ['block-start', 'text-delta', 'block-end', 'usage', 'finish'],
   )
   assert.equal(chunks[1].text, 'hello from hitchfin scaffold')
+})
+
+test('adapter implements the host image contract methods', () => {
+  const adapter = makeAdapter()
+  // dsh-token-meter calls imageRequestPricing unconditionally; a missing
+  // method is a TypeError during compaction, not a soft fallback.
+  assert.equal(adapter.imageRequestPricing(descriptor.providerId, 'free-model'), undefined)
+  assert.deepEqual(
+    adapter.imageRequestTarget(descriptor.providerId, 'free-model', {
+      attachmentId: 'sha256:test',
+      mediaType: 'image/png',
+      bytes: 30,
+      width: 10,
+      height: 20,
+    }),
+    { width: 10, height: 20, maxBytes: 30 },
+  )
 })
 
 test('channel adapter filters paid models by default and maps metadata', async () => {
@@ -219,6 +242,99 @@ test('channel adapter streams through the worker SSE proxy', async () => {
   assert.equal(chunks[4].reason.kind, 'stop')
 })
 
+test('durable host image blocks are projected into the request body', async () => {
+  const account = {
+    channelId: descriptor.id,
+    accountId: 'acct-1',
+    label: 'Test',
+    auth: { type: 'oauth', access: 'token' },
+    freeOnly: false,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  const bodies = []
+  const worker = {
+    models: async () => [
+      {
+        id: 'vision-model',
+        name: 'Vision Model',
+        contextWindow: 128000,
+        input: ['text', 'image'],
+        efforts: [],
+        free: false,
+        freeKnown: true,
+      },
+    ],
+    fetch: async (_input, init) => {
+      bodies.push(JSON.parse(String(init.body)))
+      return sseResponse()
+    },
+  }
+  const readImage = async () => ({ data: Uint8Array.from([1, 2, 3]), mediaType: 'image/png' })
+  const adapter = makeAdapter({ accounts: makeAccounts([account]), worker, readImage })
+  const models = await adapter.listModels(descriptor.providerId)
+  assert.deepEqual(models[0].inputModalities, ['text', 'image'])
+
+  const chunks = []
+  for await (const chunk of adapter.stream({
+    provider: descriptor.providerId,
+    model: 'vision-model',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: 'sha256:test',
+              mediaType: 'image/png',
+              bytes: 3,
+              width: 10,
+              height: 10,
+            },
+          },
+          { type: 'text', text: 'what is this?' },
+        ],
+      },
+    ],
+  })) {
+    chunks.push(chunk)
+  }
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  const parts = bodies[0].messages[0].content
+  assert.deepEqual(parts.find((part) => part.type === 'image_url').image_url.url, 'data:image/png;base64,AQID')
+  assert.ok(parts.some((part) => part.type === 'text' && part.text === 'what is this?'))
+})
+
+test('without an attachment reader the catalog stops advertising images', async () => {
+  const account = {
+    channelId: descriptor.id,
+    accountId: 'acct-1',
+    label: 'Test',
+    auth: { type: 'oauth', access: 'token' },
+    freeOnly: false,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  const worker = {
+    models: async () => [
+      {
+        id: 'vision-model',
+        name: 'Vision Model',
+        contextWindow: 128000,
+        input: ['text', 'image'],
+        efforts: [],
+        free: false,
+        freeKnown: true,
+      },
+    ],
+    fetch: async () => sseResponse(),
+  }
+  const adapter = makeAdapter({ accounts: makeAccounts([account]), worker })
+  const models = await adapter.listModels(descriptor.providerId)
+  assert.deepEqual(models[0].inputModalities, ['text'])
+})
+
 test('dedupeModels keeps canonical ids for duplicate display names', () => {
   const models = dedupeModels([
     { id: 'glm-5.2_advisor_doubao', name: 'GLM-5.2', free: false, freeKnown: false },
@@ -236,7 +352,7 @@ test('dedupeModels keeps canonical ids for duplicate display names', () => {
   )
 })
 
-test('channel adapter shows all models when free metadata is unknown', async () => {
+test('a channel that never publishes prices shows all models under free-only', async () => {
   const account = {
     channelId: descriptor.id,
     accountId: 'acct-1',
@@ -269,9 +385,43 @@ test('channel adapter shows all models when free metadata is unknown', async () 
     ],
     fetch: async () => sseResponse(),
   }
-  const adapter = makeAdapter({ accounts: makeAccounts([account]), worker })
+  const adapter = makeAdapter({
+    accounts: makeAccounts([account]),
+    worker,
+    // Trae CN has no free/paid metadata by design.
+    registryDescriptor: { ...descriptor, supportsFreeWindow: false },
+  })
   const models = await adapter.listModels(descriptor.providerId)
   assert.deepEqual(models.map((model) => model.id), ['trae-a'])
+})
+
+test('a channel expected to publish prices hides unknown models under free-only', async () => {
+  const account = {
+    channelId: descriptor.id,
+    accountId: 'acct-1',
+    label: 'Test',
+    auth: { type: 'oauth', access: 'token' },
+    freeOnly: true,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  const worker = {
+    models: async () => [
+      {
+        id: 'unpriced',
+        name: 'Unpriced',
+        contextWindow: 100000,
+        input: ['text'],
+        efforts: [],
+        free: false,
+        freeKnown: false,
+      },
+    ],
+    fetch: async () => sseResponse(),
+  }
+  const adapter = makeAdapter({ accounts: makeAccounts([account]), worker })
+  const models = await adapter.listModels(descriptor.providerId)
+  assert.deepEqual(models, [])
 })
 
 test('channel adapter asks for sign-in when no account exists', async () => {

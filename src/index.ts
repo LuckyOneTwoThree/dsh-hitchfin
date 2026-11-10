@@ -1,10 +1,10 @@
 import { HitchfinAdapter, SPIKE_PROVIDER } from './adapter/hitchfin-adapter.js'
 import { AccountStore, accountKey, labelFromAuth } from './accounts/store.js'
-import { errorMessage } from './errors.js'
+import { HitchfinError, errorMessage } from './errors.js'
 import { ChannelRegistry } from './channels/registry.js'
 import { ChannelWorkerHost } from './host/worker-host.js'
 import { registerHitchfinRoutes } from './routes.js'
-import type { HitchfinContext } from './types.js'
+import type { HitchfinContext, ImageAttachmentRef } from './types.js'
 
 export const name = 'dsh-hitchfin'
 export const inject = ['llm', 'credentials', 'authorization']
@@ -18,12 +18,35 @@ export interface HitchfinConfig {
   channelPackages?: Record<string, string>
 }
 
+interface AttachmentReaderLike {
+  readImageRequest(
+    ref: ImageAttachmentRef,
+    target: { width: number; height: number; maxBytes: number },
+    signal?: AbortSignal,
+  ): Promise<{ data: Uint8Array; mediaType: string }>
+}
+
+/** Resolve the host attachment service at call time: it may activate after this plugin. */
+function attachmentReader(ctx: HitchfinContext): AttachmentReaderLike | undefined {
+  try {
+    const attachments = ctx.get?.('attachments') as AttachmentReaderLike | undefined
+    return attachments && typeof attachments.readImageRequest === 'function'
+      ? attachments
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
   const registry = new ChannelRegistry(config.channelPackages ?? {})
   const accounts = new AccountStore(ctx.credentials)
+  let authChanged:
+    | ((channelId: string, accountId: string, auth: unknown) => void)
+    | undefined
   const worker = new ChannelWorkerHost({
     onAuthChanged: (channelId, accountId, auth) => {
-      void accounts.updateAuth(channelId, accountId, auth)
+      authChanged?.(channelId, accountId, auth)
     },
     onAudit: ({ channelId, packagePath }) => {
       ctx.logger.info(`dsh-hitchfin: loaded channel package ${channelId} from ${packagePath}`)
@@ -31,13 +54,50 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
   })
 
   const devSpike = config.devSpike === true
+  const readImage = (
+    ref: ImageAttachmentRef,
+    signal?: AbortSignal,
+  ): Promise<{ data: Uint8Array; mediaType: string }> => {
+    const reader = attachmentReader(ctx)
+    if (!reader) {
+      throw new HitchfinError(
+        'the host attachment service is unavailable; restart DSH and try again',
+        'INVALID_REQUEST',
+      )
+    }
+    return reader.readImageRequest(
+      ref,
+      { width: ref.width, height: ref.height, maxBytes: ref.bytes },
+      signal,
+    )
+  }
   const adapter = new HitchfinAdapter({
     registry,
     accounts,
     worker,
     logger: ctx.logger,
     devStaticModels: config.devStaticModels ?? false,
+    readImage,
+    canReadImages: () => attachmentReader(ctx) !== undefined,
   })
+
+  // A channel package can refresh its own token through client.auth.set(). The
+  // failure that triggered the refresh may have put the account in AUTH
+  // cooldown; persist the auth and clear that routing state, but never let a
+  // rejected credentials write escape as an unhandled rejection.
+  authChanged = (channelId, accountId, auth) => {
+    void accounts
+      .updateAuth(channelId, accountId, auth)
+      .then(() => {
+        const descriptor = registry.all().find((entry) => entry.id === channelId)
+        if (descriptor) adapter.forget(descriptor.providerId, accountId)
+      })
+      .catch((error) => {
+        ctx.logger.warn(
+          `dsh-hitchfin: storing refreshed ${channelId}/${accountId} auth failed: ${errorMessage(error)}`,
+        )
+      })
+  }
 
   const providers = [
     ...(devSpike ? [SPIKE_PROVIDER] : []),
@@ -74,19 +134,30 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
     ctx.logger.warn('dsh-hitchfin: webServer is unavailable; settings routes are disabled')
   }
 
-  // Best effort: hosts that expose a Cordis-style dispose hook get a clean
-  // teardown; older hosts keep the previous behaviour untouched.
-  if (typeof ctx.on === 'function') {
-    ctx.on('dispose', () => {
-      for (const cleanup of cleanups) {
-        try {
-          cleanup()
-        } catch {
-          // The host may already be tearing down its services.
-        }
+  // Cordis 4 ends a plugin through its fiber, not through a `dispose` event.
+  // `ctx.on('dispose', ...)` silently never fires here, which used to leak the
+  // worker thread and leave the settings route registered across a reload.
+  const disposePlugin = (): void => {
+    for (const cleanup of cleanups) {
+      try {
+        cleanup()
+      } catch {
+        // The host may already be tearing down its services.
       }
-      void worker.stop()
-    })
+    }
+    void worker.stop()
+  }
+  let teardownRegistered = false
+  if (typeof ctx.effect === 'function') {
+    try {
+      ctx.effect(() => disposePlugin)
+      teardownRegistered = true
+    } catch {
+      // Fall back to the legacy hook below.
+    }
+  }
+  if (!teardownRegistered && typeof ctx.on === 'function') {
+    ctx.on('dispose', disposePlugin)
   }
 
   if (ctx.authorization) {
@@ -115,7 +186,13 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
             {},
             existing?.proxy,
           )
-          const onAbort = () => worker.cancelAuth(started.session)
+          const onAbort = () => {
+            try {
+              worker.cancelAuth(started.session)
+            } catch {
+              // The worker may already be stopping.
+            }
+          }
           session.signal.addEventListener('abort', onAbort, { once: true })
 
           try {
@@ -139,13 +216,16 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
             await session.commit({
               kind: 'grant',
               payload: {
+                // The commit replaces the whole record. Spread the stored one
+                // first so re-authenticating preserves the user's enabled
+                // switch, priority, plan, hidden models and proxy instead of
+                // silently resetting them.
+                ...(existing ?? {}),
                 channelId: descriptor.id,
                 accountId,
                 label: existing?.label ?? labelFromAuth(descriptor.displayName, result.auth),
                 auth: result.auth,
                 freeOnly: existing !== undefined ? existing.freeOnly : descriptor.freeOnlyDefault,
-                hiddenModels: existing?.hiddenModels,
-                ...(existing?.proxy ? { proxy: existing.proxy } : {}),
                 createdAt: existing?.createdAt ?? now,
                 updatedAt: now,
               },

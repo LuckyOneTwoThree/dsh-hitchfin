@@ -13,6 +13,7 @@ const channels = new Map()
 const authSessions = new Map()
 const streams = new Map()
 let nextAuthSession = 1
+const AUTH_SESSION_TTL_MS = 10 * 60_000
 
 const nativeFetch = globalThis.fetch
 let undiciModule = null
@@ -374,14 +375,16 @@ async function handleAuthorize(message) {
   )
 
   if (started?.type === 'failed') {
+    controller.abort()
     throw new Error(typeof started.error === 'string' ? started.error : 'sign-in failed')
   }
   if (typeof started?.callback !== 'function') {
+    controller.abort()
     throw new Error(`${loaded.provider}: sign-in returned no callback`)
   }
 
   const session = String(nextAuthSession++)
-  authSessions.set(session, {
+  const record = {
     provider: loaded.provider,
     channelId: message.channel.channelId,
     accountId: message.accountId,
@@ -389,7 +392,18 @@ async function handleAuthorize(message) {
     callback: started.callback,
     controller,
     proxy,
-  })
+    timer: undefined,
+  }
+  // A sign-in nobody finishes must release its controller (and a browser
+  // sign-in's loopback server hooks) on its own.
+  record.timer = setTimeout(() => {
+    const current = authSessions.get(session)
+    if (current !== record) return
+    authSessions.delete(session)
+    controller.abort()
+  }, AUTH_SESSION_TTL_MS)
+  record.timer.unref?.()
+  authSessions.set(session, record)
 
   return {
     session,
@@ -429,6 +443,7 @@ async function handleCallback(message) {
   const session = authSessions.get(message.session)
   if (!session) throw new Error('no such sign-in session')
   authSessions.delete(message.session)
+  clearTimeout(session.timer)
   const dispatcher = await dispatcherFor(session.proxy)
 
   const result = await scope.run(
@@ -602,6 +617,7 @@ parentPort?.on('message', (message) => {
   if (message.type === 'cancelAuth') {
     const session = authSessions.get(message.session)
     if (session) {
+      clearTimeout(session.timer)
       session.controller.abort()
       authSessions.delete(message.session)
     }
@@ -617,4 +633,7 @@ process.on('unhandledRejection', (error) => {
 })
 process.on('uncaughtException', (error) => {
   console.error('[dsh-hitchfin worker] uncaught exception:', redactError(error))
+  // The worker cannot be trusted after an uncaught exception. Exiting lets the
+  // host's crash breaker recycle it instead of serving corrupted state.
+  process.exit(1)
 })

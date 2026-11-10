@@ -193,6 +193,17 @@ test('catalog normalization marks live-layer Messages models via api.npm', () =>
   assert.equal(models[0].protocol, 'anthropic-messages')
 })
 
+test('catalog normalization reads live capabilities.input for modalities', () => {
+  const models = normalizeModels({
+    'claude-opus-5': {
+      name: 'Claude Opus 5',
+      api: { id: 'claude-opus-5', url: 'https://vendor.example/v1', npm: '@ai-sdk/anthropic' },
+      capabilities: { input: { text: true, image: true, audio: false } },
+    },
+  })
+  assert.deepEqual(models[0].input, ['text', 'image'])
+})
+
 test('channelUrl rewrites both sentinel URLs and leaves real URLs alone', () => {
   const loaded = {
     provider: 'workbuddy',
@@ -205,6 +216,16 @@ test('channelUrl rewrites both sentinel URLs and leaves real URLs alone', () => 
   assert.equal(
     channelUrl(loaded, {}, 'https://real.example/v1/custom'),
     'https://real.example/v1/custom',
+  )
+  // A package that names the complete Messages endpoint must not get a second
+  // `/v1/messages` appended.
+  assert.equal(
+    channelUrl(
+      { provider: 'custom', providerConfig: { api: 'https://api.example.com/v1/messages' } },
+      {},
+      MESSAGES_URL,
+    ),
+    'https://api.example.com/v1/messages',
   )
 })
 
@@ -310,7 +331,7 @@ test('Messages stream maps text, thinking, tool_use, usage and finish', async ()
   const usage = chunks.find((c) => c.type === 'usage').usage
   assert.equal(usage.inputTokens, 10)
   assert.equal(usage.outputTokens, 7)
-  assert.equal(usage.totalTokens, 17)
+  assert.equal(usage.totalTokens, 21)
   assert.equal(usage.cacheReadTokens, 4)
   assert.equal(chunks.at(-1).type, 'finish')
   assert.equal(chunks.at(-1).reason.kind, 'tool-calls')
@@ -492,6 +513,31 @@ test('Trae-style stream without usage or finish still completes', async () => {
   assert.equal(chunks.find((c) => c.type === 'text-delta').text, 'partial')
   assert.equal(chunks.find((c) => c.type === 'usage').usage.totalTokens, 0)
   assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
+
+test('an in-band error before content is surfaced', async () => {
+  const lines = [oai({ error: { message: 'rate limited', code: 429 } })]
+  await assert.rejects(
+    () => collect(createOpenAiSseTransport(fetchWith(() => responseFrom(lines)))(params())),
+    (error) => {
+      assert.equal(error.code, 'RATE_LIMIT')
+      return true
+    },
+  )
+})
+
+test('an empty stream becomes EMPTY_RESPONSE instead of a silent stop', async () => {
+  const lines = [
+    oai({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+    oai('[DONE]'),
+  ]
+  await assert.rejects(
+    () => collect(createOpenAiSseTransport(fetchWith(() => responseFrom(lines)))(params())),
+    (error) => {
+      assert.equal(error.code, 'EMPTY_RESPONSE')
+      return true
+    },
+  )
 })
 
 test('OpenAI transport keeps its status classification', async () => {

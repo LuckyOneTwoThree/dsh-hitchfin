@@ -70,6 +70,8 @@ test('freeOnly keeps its original semantics when free metadata exists', () => {
   )
   assert.equal(selectVisibleModels(withFree, new Set(), false).models.length, 2)
   assert.equal(selectVisibleModels(catalog, new Set(), true).models.length, 2)
+  assert.equal(selectVisibleModels(catalog, new Set(), true, true).models.length, 0)
+  assert.equal(selectVisibleModels(withFree, new Set(), true, true).models.length, 1)
 })
 
 test('canonicalHiddenNames resolves legacy ids and keeps the account intersection', () => {
@@ -203,6 +205,7 @@ test('/state hides the name group and reports canonical hidden names', async () 
   assert.equal(channel.models.some((m) => m.name === NAME), false)
   assert.deepEqual(channel.hiddenModels, [NAME.toLowerCase()])
   assert.equal(channel.allModels.some((m) => m.name === NAME), true)
+  assert.equal(channel.freeMetadataExpected, false)
 })
 
 test('/state still honours legacy id tokens', async () => {

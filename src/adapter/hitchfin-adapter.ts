@@ -16,12 +16,16 @@ import type {
 import type {
   GenerateOptions,
   HitchfinLlmAdapter,
+  ImageAttachmentRef,
+  ImageRequestTarget,
   LlmFailure,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
   Logger,
   PreparedAdapterCall,
+  RequestContentBlock,
+  RequestMessage,
   StreamChunk,
 } from '../types.js'
 
@@ -30,6 +34,17 @@ const SPIKE_MODEL = 'spike-model'
 
 interface ModelRecord extends ChannelModelRecord {
   accountId?: string
+}
+
+type ModelSource = Pick<
+  AccountPayload,
+  'accountId' | 'auth' | 'freeOnly' | 'hiddenModels' | 'proxy' | 'enabled'
+>
+
+interface AccountListing {
+  account: ModelSource
+  models: readonly ChannelModelRecord[]
+  error?: unknown
 }
 
 interface ModelCacheEntry {
@@ -75,20 +90,35 @@ export interface HitchfinAdapterOptions {
   logger: Logger
   /** Development: show a channel's static model list before sign-in. */
   devStaticModels?: boolean
+  /**
+   * Read one durable image attachment into the bytes a model request carries.
+   * Supplied when the host mounts its attachment service; without it the
+   * catalog stops advertising image input instead of silently losing images.
+   */
+  readImage?: (
+    ref: ImageAttachmentRef,
+    signal?: AbortSignal,
+  ) => Promise<{ data: Uint8Array; mediaType: string }>
+  /** Whether the host currently exposes the attachment reader at all. */
+  canReadImages?: () => boolean
 }
 
 function modelInfo(
   descriptor: ChannelDescriptor,
   record: ModelRecord,
+  includeImages: boolean,
 ): LlmResolvedModelInfo {
   const free = record.freeKnown && record.free
+  const input = includeImages
+    ? record.input
+    : record.input.filter((modality) => modality !== 'image')
   return {
     provider: descriptor.providerId,
     id: record.id,
     name: record.name,
     description:
       descriptor.displayName + (descriptor.status === 'experimental' ? ' · Experimental' : ''),
-    inputModalities: record.input,
+    inputModalities: input.length > 0 ? input : ['text'],
     ...(record.contextWindow !== undefined
       ? { context: { contextWindow: record.contextWindow } }
       : {}),
@@ -137,6 +167,14 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
   private readonly protocols = new Map<string, TransportProtocol>()
   /** provider + model -> account ids that actually expose the model. */
   private readonly modelAccounts = new Map<string, Set<string>>()
+  /** provider + account -> model ids that account may actually receive. */
+  private readonly accountModels = new Map<string, Set<string>>()
+  /** providers whose last model listing completed and may be trusted as a whole. */
+  private readonly completeCatalogs = new Set<string>()
+  /** consecutive incomplete listings, used for a short negative cache. */
+  private readonly incompleteAttempts = new Map<string, number>()
+  /** provider -> timestamp before which an incomplete listing is not retried. */
+  private readonly incompleteRetryAt = new Map<string, number>()
   /** provider + account -> timestamp of the last successful stream (in memory). */
   private readonly lastUsed = new Map<string, number>()
   /** providers whose last model listing had a partial account failure. */
@@ -148,6 +186,9 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
     if (provider) {
       this.cache.delete(provider)
       this.incompleteProviders.delete(provider)
+      this.completeCatalogs.delete(provider)
+      this.incompleteAttempts.delete(provider)
+      this.incompleteRetryAt.delete(provider)
       const prefix = `${provider}\0`
       for (const key of this.protocols.keys()) {
         if (key.startsWith(prefix)) this.protocols.delete(key)
@@ -155,11 +196,18 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       for (const key of this.modelAccounts.keys()) {
         if (key.startsWith(prefix)) this.modelAccounts.delete(key)
       }
+      for (const key of this.accountModels.keys()) {
+        if (key.startsWith(prefix)) this.accountModels.delete(key)
+      }
     } else {
       this.cache.clear()
       this.incompleteProviders.clear()
+      this.completeCatalogs.clear()
+      this.incompleteAttempts.clear()
+      this.incompleteRetryAt.clear()
       this.protocols.clear()
       this.modelAccounts.clear()
+      this.accountModels.clear()
     }
   }
 
@@ -189,6 +237,20 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
 
   providerRetryPolicy(): undefined {
     return undefined
+  }
+
+  /** This adapter is not an image-billed route; the host token meter falls back. */
+  imageRequestPricing(_provider: string, _model: string): undefined {
+    return undefined
+  }
+
+  /** Preserve the normalized request image; the channel package may shrink it. */
+  imageRequestTarget(
+    _provider: string,
+    _model: string,
+    image: ImageAttachmentRef,
+  ): ImageRequestTarget {
+    return { width: image.width, height: image.height, maxBytes: image.bytes }
   }
 
   private cooldownFor(
@@ -276,11 +338,22 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
     return out
   }
 
+  /** Whether this route can actually turn a durable image into request bytes. */
+  private imagesAvailable(): boolean {
+    return this.options.readImage !== undefined && (this.options.canReadImages?.() ?? true)
+  }
+
   private async protocolFor(provider: string, model: string): Promise<TransportProtocol> {
     const key = `${provider}\0${model}`
     const cached = this.cache.get(provider)
     const expired = cached !== undefined && Date.now() - cached.at >= 30_000
-    if (!this.protocols.has(key) || expired || this.incompleteProviders.has(provider)) {
+    const incomplete = this.incompleteProviders.has(provider)
+    const backoffUntil = this.incompleteRetryAt.get(provider) ?? 0
+    // A broken account used to force a full listing before every single
+    // stream. Keep one immediate retry, then wait out a short negative cache
+    // instead of paying every listing timeout again.
+    const mayRelist = !incomplete || Date.now() >= backoffUntil
+    if (!this.protocols.has(key) || expired || (incomplete && mayRelist)) {
       await this.listModels(provider)
     }
     return this.protocols.get(key) ?? 'openai-completions'
@@ -343,30 +416,43 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
 
     try {
       const accounts = sortAccountsByPriority(await this.options.accounts.list(descriptor.id))
-      const sources: readonly Pick<
-        AccountPayload,
-        'accountId' | 'auth' | 'freeOnly' | 'hiddenModels' | 'proxy' | 'enabled'
-      >[] =
-        accounts.length > 0
-          ? accounts
-          : this.options.devStaticModels
+      // A disabled account keeps its credentials, proxy and visibility
+      // settings, but it no longer offers models: listing it would show a
+      // model in the picker that no enabled account can serve.
+      const activeAccounts = accounts.filter((account) => account.enabled !== false)
+      const sources: readonly ModelSource[] =
+        activeAccounts.length > 0
+          ? activeAccounts
+          : accounts.length === 0 && this.options.devStaticModels
             ? [{ accountId: 'static', auth: undefined, freeOnly: false, hiddenModels: [] }]
             : []
 
       const byId = new Map<string, ModelRecord>()
       const ownersByModel = new Map<string, Set<string>>()
+      const perAccount = new Map<string, Set<string>>()
       let allAccountsListed = true
-      for (const account of sources) {
-        let models: readonly ChannelModelRecord[]
-        try {
-          models = await this.options.worker.models({
-            channel: loadInfo,
-            accountId: account.accountId,
-            auth: account.auth,
-            freeOnly: account.freeOnly !== false,
-            ...(account.proxy ? { proxy: account.proxy } : {}),
-          })
-        } catch (error) {
+
+      // One slow account must not serialize the whole catalog; the worker
+      // already time-bounds each listing, so run them together.
+      const listings = await Promise.all(
+        sources.map(async (account): Promise<AccountListing> => {
+          try {
+            const models = await this.options.worker.models({
+              channel: loadInfo,
+              accountId: account.accountId,
+              auth: account.auth,
+              freeOnly: account.freeOnly !== false,
+              ...(account.proxy ? { proxy: account.proxy } : {}),
+            })
+            return { account, models }
+          } catch (error) {
+            return { account, models: [], error }
+          }
+        }),
+      )
+
+      for (const { account, models, error } of listings) {
+        if (error !== undefined) {
           allAccountsListed = false
           this.options.logger.warn(
             `dsh-hitchfin: listing ${descriptor.displayName} models for ${account.accountId} failed: ${errorMessage(error)}`,
@@ -377,19 +463,29 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
           models,
           new Set(account.hiddenModels ?? []),
           account.freeOnly !== false,
+          descriptor.supportsFreeWindow,
         )
         if (
           account.freeOnly !== false &&
-          selection.hasFreeMetadata &&
           selection.candidates.length === 0 &&
           models.length > 0
         ) {
           this.options.logger.warn(
-            `dsh-hitchfin: ${descriptor.displayName} has no free model available; hiding ${models.length} model(s) under free-only`,
+            `dsh-hitchfin: ${descriptor.displayName} ${
+              selection.hasFreeMetadata
+                ? 'has no free model available'
+                : 'returned no free/paid metadata'
+            }; hiding ${models.length} model(s) under free-only`,
+          )
+        }
+        if (account.auth !== undefined) {
+          perAccount.set(
+            `${provider}\0${account.accountId}`,
+            new Set(selection.candidates.map((model) => model.id)),
           )
         }
         for (const model of selection.candidates) {
-          if (account.auth !== undefined && account.enabled !== false) {
+          if (account.auth !== undefined) {
             let owners = ownersByModel.get(model.id)
             if (!owners) {
               owners = new Set()
@@ -405,15 +501,24 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       }
 
       const ownerPrefix = `${provider}\0`
-      for (const key of this.modelAccounts.keys()) {
-        if (key.startsWith(ownerPrefix)) this.modelAccounts.delete(key)
+      for (const map of [this.modelAccounts, this.accountModels]) {
+        for (const key of map.keys()) {
+          if (key.startsWith(ownerPrefix)) map.delete(key)
+        }
       }
       // A failed account listing would make the ownership index incomplete, so
       // fall back to unrestricted routing instead of excluding a valid account.
       if (allAccountsListed && accounts.length > 0) {
-        for (const [id, owners] of ownersByModel) {
-          this.modelAccounts.set(`${ownerPrefix}${id}`, owners)
+        // A model in a complete catalog that no enabled account owns becomes an
+        // explicit empty set. `stream()` reads that as MODEL_NOT_FOUND, while a
+        // missing entry (incomplete listing) still means "ownership unknown".
+        for (const id of byId.keys()) {
+          this.modelAccounts.set(
+            `${ownerPrefix}${id}`,
+            new Set(ownersByModel.get(id) ?? []),
+          )
         }
+        for (const [key, ids] of perAccount) this.accountModels.set(key, ids)
       }
 
       for (const [id, record] of byId) {
@@ -421,13 +526,22 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       }
 
       const models = dedupeModels([...byId.values()]).map((record) =>
-        modelInfo(descriptor, record),
+        modelInfo(descriptor, record, this.imagesAvailable()),
       )
       if (allAccountsListed) {
         this.incompleteProviders.delete(provider)
+        this.incompleteAttempts.delete(provider)
+        this.incompleteRetryAt.delete(provider)
+        this.completeCatalogs.add(provider)
         this.cache.set(provider, { at: Date.now(), models })
       } else {
+        const attempts = (this.incompleteAttempts.get(provider) ?? 0) + 1
+        this.incompleteAttempts.set(provider, attempts)
         this.incompleteProviders.add(provider)
+        this.completeCatalogs.delete(provider)
+        // Allow one immediate retry, then stop paying every listing timeout
+        // before each stream for a persistently broken account.
+        this.incompleteRetryAt.set(provider, attempts <= 1 ? 0 : Date.now() + 10_000)
         this.cache.delete(provider)
       }
       return models
@@ -554,15 +668,38 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
     }
 
     const protocol = await this.protocolFor(options.provider, options.model)
-    const owners = this.modelAccounts.get(`${options.provider}\0${options.model}`)
-    const capable = signedIn.filter((entry) => owners === undefined || owners.has(entry.accountId))
+    const catalogKey = `${options.provider}\0${options.model}`
+    const owners = this.modelAccounts.get(catalogKey)
+    if (this.completeCatalogs.has(options.provider) && owners === undefined) {
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: {
+            message: `${descriptor.displayName}: model ${options.model} is not offered by any enabled account`,
+            code: 'MODEL_NOT_FOUND',
+          },
+        },
+      }
+      return
+    }
+    const capable = signedIn.filter((entry) => {
+      if (owners !== undefined && !owners.has(entry.accountId)) return false
+      const allowed = this.accountModels.get(
+        `${options.provider}\0${entry.accountId}`,
+      )
+      // A missing per-account entry means the catalog is incomplete for that
+      // account (fall back to unrestricted); a present set enforces the
+      // account's free-only and hidden-model settings at request time.
+      return allowed === undefined || allowed.has(options.model)
+    })
     if (capable.length === 0) {
       yield {
         type: 'finish',
         reason: {
           kind: 'error',
           failure: {
-            message: `${descriptor.displayName}: no signed-in account offers model ${options.model}`,
+            message: `${descriptor.displayName}: no enabled account offers model ${options.model} under its current settings`,
             code: 'MODEL_NOT_FOUND',
           },
         },
@@ -590,6 +727,29 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
         reason: {
           kind: 'error',
           failure: this.coolingFailure(descriptor, options.provider, capable, options.model),
+        },
+      }
+      return
+    }
+
+    let messages: readonly RequestMessage[] = options.messages
+    try {
+      messages = await this.projectImages(options.messages, options.signal)
+    } catch (error) {
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: failureOf(
+            error instanceof HitchfinError
+              ? error
+              : new HitchfinError(
+                  `image attachment could not be read: ${errorMessage(error)}`,
+                  'INVALID_REQUEST',
+                  { cause: error },
+                ),
+            options.signal,
+          ),
         },
       }
       return
@@ -627,7 +787,7 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
         const upstream = transport({
           provider: options.provider,
           modelId: options.model,
-          messages: options.messages,
+          messages,
           options,
           signal: options.signal,
           sessionId: options.sessionId,
@@ -653,6 +813,12 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
           yield { type: 'finish', reason: { kind: 'error', failure } }
           return
         }
+        // A request the provider considers malformed will be rejected the same
+        // way by every account; do not spend the failover budget on it.
+        if (failure.code === 'INVALID_REQUEST' || failure.code === 'UNSUPPORTED_CONTENT') {
+          yield { type: 'finish', reason: { kind: 'error', failure } }
+          return
+        }
         this.options.logger.warn(
           `dsh-hitchfin: ${descriptor.displayName} account ${account.accountId} failed (${failure.code}); trying another account`,
         )
@@ -670,6 +836,59 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
           },
       },
     }
+  }
+
+  /**
+   * Turn durable host images into the base64 blocks both transports serialize.
+   * Without an attachment reader the catalog stops advertising image input;
+   * this fallback only protects a request that already carries one.
+   */
+  private async projectImages(
+    messages: readonly RequestMessage[],
+    signal?: AbortSignal,
+  ): Promise<readonly RequestMessage[]> {
+    let changedAny = false
+    const projected: RequestMessage[] = []
+    for (const message of messages) {
+      if (!Array.isArray(message.content)) {
+        projected.push(message)
+        continue
+      }
+      let changed = false
+      const content: RequestContentBlock[] = []
+      for (const block of message.content) {
+        if (block && typeof block === 'object' && block.type === 'image') {
+          const record = block as Record<string, unknown>
+          const reference = record.attachment
+          if (reference && typeof reference === 'object') {
+            if (this.options.readImage && record.offloaded !== true) {
+              const version = await this.options.readImage(
+                reference as ImageAttachmentRef,
+                signal,
+              )
+              content.push({
+                type: 'image',
+                image: Buffer.from(version.data).toString('base64'),
+                mimeType: version.mediaType,
+              })
+              changed = true
+              continue
+            }
+            content.push({ type: 'text', text: '[image attachment omitted]' })
+            changed = true
+            continue
+          }
+        }
+        content.push(block)
+      }
+      if (changed) {
+        projected.push({ ...message, content })
+        changedAny = true
+      } else {
+        projected.push(message)
+      }
+    }
+    return changedAny ? projected : messages
   }
 
   private async *streamSpike(options: GenerateOptions): AsyncIterable<StreamChunk> {

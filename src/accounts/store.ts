@@ -38,6 +38,20 @@ export type AccountAuth = unknown
 
 const SCOPE = 'dsh-hitchfin'
 
+/**
+ * Host credential keys are `<scope>/<id>` and each segment must match
+ * `^[a-z][a-z0-9-]*$`. The id half is `${channelId}-${accountId}`; a channel
+ * id is fixed and lowercase, so validating the account id is what keeps a
+ * user-supplied value from producing a key the credential store cannot parse
+ * again (and would refuse at the next boot).
+ */
+const ACCOUNT_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/
+const KEY_SEGMENT_PATTERN = /^[a-z][a-z0-9-]*$/
+
+export function isValidAccountId(accountId: string): boolean {
+  return ACCOUNT_ID_PATTERN.test(accountId)
+}
+
 export function accountKey(channelId: string, accountId: string): string {
   return `${SCOPE}/${channelId}-${accountId}`
 }
@@ -215,6 +229,11 @@ export class AccountStore {
 
   async save(payload: AccountPayload): Promise<AccountPayload> {
     if (!this.credentials) throw new Error('DSH credentials service is not available')
+    if (!KEY_SEGMENT_PATTERN.test(payload.channelId) || !isValidAccountId(payload.accountId)) {
+      throw new TypeError(
+        `dsh-hitchfin: refusing to write an account under a malformed credential key (${payload.channelId}/${payload.accountId})`,
+      )
+    }
     const now = Date.now()
     const next: AccountPayload = {
       ...payload,

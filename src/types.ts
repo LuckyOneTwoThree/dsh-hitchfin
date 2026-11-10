@@ -140,6 +140,23 @@ export interface GenerateOptions {
   stop?: readonly string[]
 }
 
+/** Durable image reference as the host passes it to an image-capable adapter. */
+export interface ImageAttachmentRef {
+  attachmentId: string
+  mediaType: string
+  bytes: number
+  width: number
+  height: number
+  name?: string
+}
+
+/** Request-image dimensions and byte target resolved for one adapter route. */
+export interface ImageRequestTarget {
+  width: number
+  height: number
+  maxBytes: number
+}
+
 export interface PreparedAdapterCall {
   model: LlmResolvedModelInfo
   stream(options: GenerateOptions): AsyncIterable<StreamChunk>
@@ -148,6 +165,14 @@ export interface PreparedAdapterCall {
 export interface HitchfinLlmAdapter {
   providerInfo(provider: string): LlmProviderInfo
   providerRetryPolicy(provider: string): undefined
+  /** Image pricing is not charged by this adapter. */
+  imageRequestPricing(provider: string, model: string): undefined
+  /** Preserve the normalized image dimensions unless the channel shrinks it. */
+  imageRequestTarget(
+    provider: string,
+    model: string,
+    image: ImageAttachmentRef,
+  ): ImageRequestTarget
   listModels(provider: string): Promise<readonly LlmModelInfo[]>
   resolveModel(
     provider: string,
@@ -247,6 +272,11 @@ export interface HitchfinContext {
   inject?(deps: string[], callback: (scope: HitchfinContext) => void): void
   get?(name: string): unknown
   emit?(event: string, ...args: unknown[]): void
-  /** Cordis-style disposal hook; optional because older hosts may not expose it. */
+  /** Cordis 4 lifecycle: the returned disposer runs when the owning fiber ends. */
+  effect?(setup: () => void | (() => void)): unknown
+  /**
+   * Legacy Cordis 3-style disposal hook. Cordis 4 never emits `dispose`; this
+   * exists only so an older host keeps working.
+   */
   on?(event: string, listener: (...args: unknown[]) => void): unknown
 }

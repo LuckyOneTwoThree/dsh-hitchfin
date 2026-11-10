@@ -56,7 +56,8 @@ function harness(specs, responseFor = () => openAiStream()) {
     accountId: spec.accountId,
     label: spec.accountId,
     auth: { type: 'oauth', access: 'token' },
-    freeOnly: false,
+    freeOnly: spec.freeOnly ?? false,
+    enabled: spec.enabled ?? true,
     createdAt: 0,
     updatedAt: 0,
   }))
@@ -144,6 +145,38 @@ test('an incomplete model listing falls back to unrestricted routing', async () 
     ['acct-1', 'acct-2'],
   )
   assert.equal(chunks.at(-1).type, 'finish')
+})
+
+test('a disabled account does not expose its models or receive their requests', async () => {
+  const { adapter, calls } = harness([
+    { accountId: 'acct-1', models: [model('shared')] },
+    { accountId: 'acct-2', models: [model('disabled-only')], enabled: false },
+  ])
+  const models = await adapter.listModels(descriptor.providerId)
+  assert.deepEqual(models.map((entry) => entry.id), ['shared'])
+
+  const chunks = await collect(adapter.stream(generateOptions('disabled-only')))
+  assert.equal(calls.length, 0)
+  assert.equal(chunks.at(-1).reason.failure.code, 'MODEL_NOT_FOUND')
+})
+
+test('free-only excludes a known paid model from routing', async () => {
+  const { adapter, calls } = harness([
+    {
+      accountId: 'acct-1',
+      freeOnly: true,
+      models: [
+        { ...model('free-model'), free: true, freeKnown: true },
+        { ...model('paid-model'), free: false, freeKnown: true },
+      ],
+    },
+  ])
+  const models = await adapter.listModels(descriptor.providerId)
+  assert.deepEqual(models.map((entry) => entry.id), ['free-model'])
+
+  const chunks = await collect(adapter.stream(generateOptions('paid-model')))
+  assert.equal(calls.length, 0)
+  assert.equal(chunks.at(-1).reason.failure.code, 'MODEL_NOT_FOUND')
 })
 
 test('no owning account produces an explicit MODEL_NOT_FOUND finish', async () => {

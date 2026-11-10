@@ -24,7 +24,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
   <img src="https://img.shields.io/badge/version-0.4.5-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-89%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-105%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -42,7 +42,9 @@ It adds WorkBuddy CN, Qoder CN and Trae CN as native DSH model providers. Sign i
 
 Once listed, open **Plugins → Discover**, search for **dsh-hitchfin**, and install it from the card. Restart DSH if the host asks you to.
 
-### From npm (web / CLI profiles)
+### From npm (after publishing; web / CLI profiles)
+
+Use this once the package is published to npm. Until then, install from the plugin market or use the local build below.
 
 ```sh
 dsh plugin --profile web add dsh-hitchfin

@@ -94,7 +94,7 @@ tarball: https://github.com/LuckyOneTwoThree/dsh-hitchfin/releases/latest/downlo
 要么名字不带版本（如上），要么钉死 tag：
 
 ```yaml
-tarball: https://github.com/LuckyOneTwoThree/dsh-hitchfin/releases/download/v0.4.5/dsh-hitchfin-0.4.5.tgz
+tarball: https://github.com/LuckyOneTwoThree/dsh-hitchfin/releases/download/v0.4.5/dsh-hitchfin.tgz
 ```
 
 `tarball` 只有"仓库无法从源码安装"时才是必需项，我们是可选项。

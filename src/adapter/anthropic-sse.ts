@@ -237,7 +237,13 @@ interface AnthropicEvent {
     partial_json?: string
     stop_reason?: string
   }
-  message?: { usage?: { input_tokens?: number; cache_read_input_tokens?: number } }
+  message?: {
+    usage?: {
+      input_tokens?: number
+      cache_read_input_tokens?: number
+      cache_creation_input_tokens?: number
+    }
+  }
   usage?: { output_tokens?: number }
   error?: { type?: string; message?: string; code?: unknown }
 }
@@ -321,6 +327,7 @@ export function createAnthropicSseTransport(
     let inputTokens = 0
     let outputTokens = 0
     let cacheReadTokens = 0
+    let cacheWriteTokens = 0
     let finishReasonKind: 'stop' | 'tool-calls' | 'max-tokens' = 'stop'
 
     const closeBlock = function* (index: number): Generator<StreamChunk, void, unknown> {
@@ -366,6 +373,7 @@ export function createAnthropicSseTransport(
           if (usage) {
             inputTokens = usage.input_tokens ?? inputTokens
             cacheReadTokens = usage.cache_read_input_tokens ?? cacheReadTokens
+            cacheWriteTokens = usage.cache_creation_input_tokens ?? cacheWriteTokens
           }
           return
         }
@@ -490,11 +498,22 @@ export function createAnthropicSseTransport(
 
     for (const index of [...blocks.keys()]) yield* closeBlock(index)
 
+    // A normal stop with no content block is the degenerate completion the
+    // host recognizes as retryable. A max-token stop may legitimately carry
+    // no text, matching the host's own Messages adapter.
+    if (nextBlockIndex === 0 && finishReasonKind === 'stop') {
+      throw new HitchfinError('channel returned an empty response', 'EMPTY_RESPONSE')
+    }
+
     const usage: TokenUsage = {
       inputTokens: Math.max(0, inputTokens),
       outputTokens: Math.max(0, outputTokens),
-      totalTokens: Math.max(0, inputTokens + outputTokens),
+      totalTokens: Math.max(
+        0,
+        inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+      ),
       ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
+      ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
     }
     yield { type: 'usage', usage }
     yield { type: 'finish', reason: { kind: finishReasonKind } }

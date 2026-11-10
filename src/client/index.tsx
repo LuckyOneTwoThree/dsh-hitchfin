@@ -64,6 +64,8 @@ interface Channel {
   quota?: Quota | null
   modelCount: number
   freeStatusKnown: boolean
+  /** The channel normally publishes free/paid metadata; unknown means hidden under free-only. */
+  freeMetadataExpected?: boolean
   freeOnly: boolean
 }
 
@@ -1136,7 +1138,10 @@ function quotaRows(quota: Quota | null | undefined, now: number): QuotaRow[] {
 
 function visibleModels(channel: Channel): Model[] {
   const hidden = new Set(channel.hiddenModels ?? [])
-  const freeFilter = channel.freeOnly && channel.freeStatusKnown
+  // A channel that normally reports prices keeps free-only honest even when a
+  // listing just failed; a channel with no such metadata (Trae) shows all.
+  const freeFilter =
+    channel.freeOnly && (channel.freeStatusKnown || channel.freeMetadataExpected === true)
   return (channel.allModels ?? []).filter(
     (model) => !isModelHidden(model, hidden) && (!freeFilter || model.free),
   )

@@ -9,7 +9,10 @@ const descriptor = {
   providerId: 'hitchfin-workbuddy-cn',
   displayName: 'WorkBuddy CN',
   packageName: 'mock',
-  authMethods: [{ id: 'browser', label: 'Browser', kind: 'browser', index: 0 }],
+  authMethods: [
+    { id: 'browser', label: 'Browser', kind: 'browser', index: 0 },
+    { id: 'api-key', label: 'Key', kind: 'api-key', index: 2 },
+  ],
   freeOnlyDefault: true,
 }
 
@@ -43,7 +46,7 @@ function makeRes() {
   }
 }
 
-function harness(existingAccounts = []) {
+function harness(existingAccounts = [], routeOptions = {}) {
   let handler
   let release
   let cancelCount = 0
@@ -96,7 +99,7 @@ function harness(existingAccounts = []) {
     },
     adapter: { invalidate() {}, forget() {} },
   }
-  const cleanup = registerHitchfinRoutes(ctx, services)
+  const cleanup = registerHitchfinRoutes(ctx, services, routeOptions)
   return {
     handler,
     release,
@@ -211,6 +214,92 @@ test('cancelling an already completed login does not overwrite ok status or recy
     assert.equal(cancelled.status, 200)
     assert.equal(cancelled.json.login.status, 'ok')
     assert.equal(getCancelCount(), 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('login routes reject account ids that are not credential-key safe', async () => {
+  const { handler, cleanup } = harness()
+  try {
+    const started = await invoke(handler, 'POST', `${PREFIX}/login/start`, {
+      channelId: descriptor.id,
+      method: 0,
+      accountId: 'BAD_ID',
+    })
+    assert.equal(started.status, 400)
+    assert.match(started.json.error, /accountId/)
+
+    const keyed = await invoke(handler, 'POST', `${PREFIX}/login/apikey`, {
+      channelId: descriptor.id,
+      method: 2,
+      accountId: 'a/b',
+      key: 'sk-test',
+    })
+    assert.equal(keyed.status, 400)
+    assert.match(keyed.json.error, /accountId/)
+  } finally {
+    cleanup()
+  }
+})
+
+test('login start refuses a method the product did not expose', async () => {
+  const { handler, cleanup, saved } = harness()
+  try {
+    const hidden = await invoke(handler, 'POST', `${PREFIX}/login/start`, {
+      channelId: descriptor.id,
+      method: 1,
+      accountId: 'acct-1',
+    })
+    assert.equal(hidden.status, 400)
+    assert.match(hidden.json.error, /unknown sign-in method/)
+
+    const apiKeyViaStart = await invoke(handler, 'POST', `${PREFIX}/login/start`, {
+      channelId: descriptor.id,
+      method: 2,
+      accountId: 'acct-1',
+    })
+    assert.equal(apiKeyViaStart.status, 400)
+    assert.equal(saved.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('an expired login cancels its worker session and never saves a late account', async () => {
+  const { handler, release, saved, cleanup, getCancelCount } = harness([], {
+    loginTtlMs: 15,
+  })
+  try {
+    const started = await invoke(handler, 'POST', `${PREFIX}/login/start`, {
+      channelId: descriptor.id,
+      method: 0,
+      accountId: 'acct-1',
+    })
+    assert.equal(started.status, 200)
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    assert.equal(getCancelCount(), 1)
+
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(saved.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('the fallback fence rejects a non-loopback Host header', async () => {
+  const { handler, cleanup } = harness()
+  try {
+    const req = makeReq('GET', `${PREFIX}/state`)
+    req.headers.host = 'evil.example'
+    const res = makeRes()
+    handler(req, res)
+    for (let i = 0; i < 50 && !res.body; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.equal(res.statusCode, 403)
+    assert.match(res.body, /host refused/)
   } finally {
     cleanup()
   }

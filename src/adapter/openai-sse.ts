@@ -179,6 +179,7 @@ interface OpenAiSseChunkPayload {
     }
     finish_reason?: string | null
   }>
+  error?: { message?: string; code?: unknown; type?: unknown } | string
   usage?: {
     prompt_tokens?: number
     completion_tokens?: number
@@ -319,6 +320,7 @@ export function createOpenAiSseTransport(
 
     let latestUsage: TokenUsage | null = null
     let finishReasonKind: 'stop' | 'tool-calls' | 'max-tokens' = 'stop'
+    let sawVisible = false
 
     const closeActiveStreamBlock = function* (): Generator<StreamChunk, void, unknown> {
       if (!activeStreamBlock) return
@@ -350,6 +352,23 @@ export function createOpenAiSseTransport(
         return false
       }
 
+      // A vendor that closes an otherwise healthy stream with a trailing error
+      // object (Trae does) must not turn already-streamed content into a
+      // failure; an error before any content is a real failure.
+      if (parsed.error !== undefined && parsed.error !== null && !sawVisible) {
+        const message =
+          typeof parsed.error === 'string'
+            ? parsed.error
+            : typeof parsed.error.message === 'string'
+              ? parsed.error.message
+              : 'unknown error'
+        const status =
+          typeof parsed.error === 'object' && typeof parsed.error.code === 'number'
+            ? parsed.error.code
+            : 500
+        throw failureForStatus(status, `: ${message}`)
+      }
+
       if (parsed.usage) {
         const promptTokens = parsed.usage.prompt_tokens ?? 0
         const completionTokens = parsed.usage.completion_tokens ?? 0
@@ -377,6 +396,7 @@ export function createOpenAiSseTransport(
               : ''
 
         if (reasoningDelta.length > 0) {
+          sawVisible = true
           if (activeStreamBlock && activeStreamBlock.kind !== 'reasoning') {
             yield* closeActiveStreamBlock()
           }
@@ -390,6 +410,7 @@ export function createOpenAiSseTransport(
         }
 
         if (typeof delta.content === 'string' && delta.content.length > 0) {
+          sawVisible = true
           if (activeStreamBlock && activeStreamBlock.kind !== 'text') {
             yield* closeActiveStreamBlock()
           }
@@ -403,6 +424,7 @@ export function createOpenAiSseTransport(
         }
 
         if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
+          sawVisible = true
           yield* closeActiveStreamBlock()
           for (const toolCall of delta.tool_calls) {
             const tcIndex = toolCall.index ?? 0
@@ -507,6 +529,13 @@ export function createOpenAiSseTransport(
     }
 
     if (toolCallMap.size > 0 && finishReasonKind === 'stop') finishReasonKind = 'tool-calls'
+
+    // A 200 stream that produced no block at all is the degenerate completion
+    // the host recognizes as a retryable empty response; treating it as a
+    // normal stop ended the turn with nothing for the user or the loop.
+    if (!sawVisible && finishReasonKind === 'stop') {
+      throw new HitchfinError('channel returned an empty response', 'EMPTY_RESPONSE')
+    }
 
     yield {
       type: 'usage',

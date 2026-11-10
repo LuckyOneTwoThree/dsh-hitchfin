@@ -22,6 +22,15 @@ function normalizeEfforts(entry) {
   return Object.keys(variants)
 }
 
+function capabilitiesInput(entry) {
+  const capabilities = entry?.capabilities
+  const input = capabilities && typeof capabilities === 'object' ? capabilities.input : undefined
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return []
+  return Object.entries(input)
+    .filter(([modality, value]) => value === true && (modality === 'text' || modality === 'image'))
+    .map(([modality]) => modality)
+}
+
 export function normalizeModels(models) {
   const out = []
   if (!models || typeof models !== 'object' || Array.isArray(models)) return out
@@ -29,9 +38,15 @@ export function normalizeModels(models) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
     const limit = typeof entry.limit === 'object' && entry.limit ? entry.limit : {}
     const modalities = typeof entry.modalities === 'object' && entry.modalities ? entry.modalities : {}
-    const input = Array.isArray(modalities.input)
+    // Config models carry `modalities`; live OpenCode model records carry the
+    // same fact only as `capabilities.input` (`{ text: true, image: true }`).
+    // Reading one and not the other made every signed-in WorkBuddy/Qoder model
+    // look text-only.
+    const declared = Array.isArray(modalities.input)
       ? modalities.input.filter((x) => typeof x === 'string')
-      : ['text']
+      : []
+    const fromCapabilities = capabilitiesInput(entry)
+    const input = declared.length > 0 ? declared : fromCapabilities.length > 0 ? fromCapabilities : ['text']
     const context = Number(limit.context)
     const output = Number(limit.output)
     const npm = modelNpm(entry)
@@ -73,6 +88,9 @@ export function channelUrl(loaded, options, original) {
   if (!base) throw new Error(`${loaded.provider}: channel has no base URL`)
 
   if (parsed.pathname.endsWith('/v1/messages') || parsed.pathname.endsWith('/messages')) {
+    // A provider base may already name the full Messages endpoint; appending
+    // again produced `/v1/messages/v1/messages`.
+    if (/\/messages$/.test(base)) return base
     const root = base.replace(/\/(?:v1|v2)$/, '')
     return root + '/v1/messages'
   }

@@ -7,6 +7,7 @@ import { redactError, resolvePackageEntry } from '../worker/channel-contract.mjs
 
 const crashWorker = new URL('./fixtures/crash-worker.mjs', import.meta.url)
 const auditWorker = new URL('./fixtures/audit-worker.mjs', import.meta.url)
+const authWorker = new URL('./fixtures/auth-worker.mjs', import.meta.url)
 const channel = {
   channelId: 'workbuddy-cn',
   packagePath: '/tmp/mock-channel.mjs',
@@ -57,6 +58,24 @@ test('repeated worker crashes open a circuit breaker', async () => {
       (error) => {
         assert.equal(error.code, 'SERVER')
         assert.match(error.message, /retry in/)
+        return true
+      },
+    )
+  } finally {
+    await host.stop()
+  }
+})
+
+test('cancelling a stuck callback rejects it instead of waiting for its timeout', async () => {
+  const host = new ChannelWorkerHost({ workerPath: authWorker })
+  try {
+    const started = await host.authorize(channel, 'acct-1', 0)
+    const pending = host.callback(channel, started.session)
+    host.cancelAuth(started.session)
+    await assert.rejects(
+      () => pending,
+      (error) => {
+        assert.equal(error.code, 'ABORTED')
         return true
       },
     )
@@ -130,10 +149,8 @@ test('settings route registration returns a cleanup that unregisters', async () 
   assert.equal(unregistered, true)
 })
 
-test('plugin disposal unregisters routes without throwing', async () => {
-  let dispose
-  let unregistered = false
-  const ctx = {
+function pluginContext({ unregistered, effect, on }) {
+  return {
     llm: { registerAdapter() {} },
     logger: { info() {}, warn() {} },
     credentials: {
@@ -145,23 +162,53 @@ test('plugin disposal unregisters routes without throwing', async () => {
     authorization: { registerFlow: () => () => {} },
     webServer: {
       register: () => () => {
-        unregistered = true
+        unregistered.value = true
       },
     },
     inject(_deps, callback) {
       callback(this)
     },
-    on(event, listener) {
-      if (event === 'dispose') dispose = listener
-    },
+    ...(effect ? { effect } : {}),
+    ...(on ? { on } : {}),
     emit() {},
     get() {},
   }
+}
+
+test('plugin teardown uses the Cordis effect disposer, not a dispose event', async () => {
+  const unregistered = { value: false }
+  let teardown
+  let usedDisposeEvent = false
+  const ctx = pluginContext({
+    unregistered,
+    effect(setup) {
+      teardown = setup()
+      return () => {}
+    },
+    on(event) {
+      if (event === 'dispose') usedDisposeEvent = true
+    },
+  })
   apply(ctx)
-  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(usedDisposeEvent, false)
+  assert.equal(typeof teardown, 'function')
+  assert.doesNotThrow(() => teardown())
+  assert.equal(unregistered.value, true)
+})
+
+test('legacy hosts without effect still receive the on(dispose) fallback', async () => {
+  const unregistered = { value: false }
+  let dispose
+  const ctx = pluginContext({
+    unregistered,
+    on(event, listener) {
+      if (event === 'dispose') dispose = listener
+    },
+  })
+  apply(ctx)
   assert.equal(typeof dispose, 'function')
   assert.doesNotThrow(() => dispose())
-  assert.equal(unregistered, true)
+  assert.equal(unregistered.value, true)
 })
 
 test('a stopped host rejects fetch calls without leaking a pending stream', async () => {

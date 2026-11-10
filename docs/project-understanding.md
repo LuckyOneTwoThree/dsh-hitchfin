@@ -1,5 +1,7 @@
 # dsh-hitchfin 项目理解报告
 
+> **状态说明（2026-11-10）**：本文是 0.3.1 时期的快照。此后已完成 Anthropic Messages 协议、账号优先级/停用、模型归属、熔断与清理链路等改动；其中“协议未打通”“17 项测试”“生产路径不调用 stop()”等结论已经过期。当前行为的准绳是源码与测试；阅读历史判断时请以本节之后的“历史快照”定位来看。
+
 本文作为后续优化决策的依据。
 
 ## 1. 结论
@@ -41,7 +43,7 @@ dsh-hitchfin 是运行在 DeepSeek Harness（DSH）内的原生订阅接入插�
 | `worker/index.mjs` | OpenCode / magpie shim、渠道包动态加载、登录、模型、额度、代理、厂商 fetch | 已入库，且是唯一入库的运行时产物 |
 | `src/routes.ts` | 约 13 个本地端点、loopback/Origin 围栏、登录状态机 | 已入库 |
 | `src/client/index.tsx` | 约 2700 行单体 React 设置页：样式、状态机、请求、渲染、双语 | 已入库 |
-| `tests/` | 17 项 Node 测试 / 62 断言：账号存储、适配器路由与冷却、SSE 映射、代理隧道 | 已入库 |
+| `tests/` | 105 项 Node 测试（0.4.5）：账号存储、适配器路由与冷却、SSE 映射、代理隧道 | 已入库 |
 | `lib/`、`client/` | tsc / esbuild 构建产物 | 未入库 |
 | `dsh-hitchfin-*.tgz` | 本地发布包 | 未入库 |
 | `magpie/` | 上游 `yetone/magpie` 本地克隆，仅作渠道包与 UI 参考 | 未入库，不参与构建与运行时 |
@@ -82,7 +84,7 @@ dsh-hitchfin 是运行在 DeepSeek Harness（DSH）内的原生订阅接入插�
 - **错误分类较粗**：404 一律 `MODEL_NOT_FOUND`（`src/adapter/openai-sse.ts:204-205`）；JSON 非流响应默认 `SERVER`（仅识别 401 为 AUTH）；未知异常统一 `SERVER` → 60 秒冷却（`src/adapter/hitchfin-adapter.ts:120`）。渠道包已有的结构化错误信息未被利用。
 - **可观测性弱**：约 20 处空 catch、无脱敏诊断日志，而 `worker/index.mjs:610` 用 `console.error` 打印完整 error，可能带凭证信息。
 - **前端单体**：2700 行 `.tsx` 不受 typecheck（`tsconfig.json:16`）、零测试。
-- **测试偏 happy path**：17 项测试全部针对 `lib` 产物，未覆盖真实渠道包加载、Anthropic 协议、登录取消竞态、worker 崩溃恢复、模型跨账号差异与前端交互。
+- **测试偏 happy path**：历史快照中的 17 项测试全部针对 `lib` 产物，未覆盖真实渠道包加载、Anthropic 协议、登录取消竞态、worker 崩溃恢复、模型跨账号差异与前端交互。
 
 ## 7. 潜在风险
 
@@ -123,7 +125,7 @@ Qoder 与 Trae 的实时链路验证收益高，但受厂商侧条件约束，�
 
 已验证：
 
-- `npm run typecheck` 通过；`npm test` 17 / 17 通过。
+- `npm run typecheck` 通过；`npm test` 105 / 105 通过（0.4.5 修复后）。
 - Node.js `v22.22.2`；DSH 宿主 `0.2.2-rc.1`。
 - `dsh-hitchfin-0.3.1.tgz` 共 47 项，关键产物齐全。
 - 本机 desktop profile 已安装 0.3.1 tarball（现场确认，非构建产物校验）。

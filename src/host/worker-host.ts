@@ -94,7 +94,8 @@ export interface ChannelWorkerHostOptions {
 const CRASH_WINDOW_MS = 30_000
 const CRASH_THRESHOLD = 3
 const CIRCUIT_MS = 30_000
-const CANCEL_AUTH_MAX_WAIT_MS = 30_000
+/** Long enough for a browser sign-in, short enough to stop a leaked attempt. */
+const AUTH_CALL_TIMEOUT_MS = 15 * 60_000
 
 function bytesFromBase64(data: string): Uint8Array {
   return Uint8Array.from(Buffer.from(data, 'base64'))
@@ -128,12 +129,16 @@ export class ChannelWorkerHost {
   private nextId = 1
   private readonly pending = new Map<number, PendingCall>()
   private readonly streams = new Map<number, StreamState>()
+  /** worker auth session -> pending callback RPC id */
+  private readonly authCallIds = new Map<string, number>()
   private readonly defaultTimeoutMs: number
   private readonly expectedExits = new WeakSet<Worker>()
   private crashCount = 0
   private lastCrashAt = 0
   private circuitOpenUntil = 0
   private disposed = false
+  /** Set when a cancelled auth could not recycle immediately because work was live. */
+  private recycleAfterIdle = false
 
   constructor(private readonly options: ChannelWorkerHostOptions = {}) {
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 30_000
@@ -187,6 +192,18 @@ export class ChannelWorkerHost {
   }
 
   private onMessage(raw: unknown): void {
+    try {
+      this.routeMessage(raw)
+    } catch (error) {
+      // A malformed worker message must not become an uncaught exception in
+      // the DSH host; surface it to every waiting caller instead.
+      this.failAll(error instanceof Error ? error : new Error(errorMessage(error)))
+    } finally {
+      this.maybeRecycle()
+    }
+  }
+
+  private routeMessage(raw: unknown): void {
     if (!raw || typeof raw !== 'object') return
     const message = raw as Record<string, unknown>
 
@@ -226,10 +243,17 @@ export class ChannelWorkerHost {
           cancel: () => {
             stream.cleanup?.()
             this.streams.delete(id)
-            this.send({ type: 'cancelFetch', id })
+            try {
+              this.send({ type: 'cancelFetch', id })
+            } catch {
+              // The worker is already gone.
+            }
+            this.maybeRecycle()
           },
         })
-        stream.headResolve(new Response(body, { status, headers }))
+        // 204/205/304 forbid a body; the Response constructor throws otherwise.
+        const responseBody = status === 204 || status === 205 || status === 304 ? null : body
+        stream.headResolve(new Response(responseBody, { status, headers }))
         return
       }
       if (message.type === 'chunk') {
@@ -292,12 +316,18 @@ export class ChannelWorkerHost {
     this.ensureWorker().postMessage(message)
   }
 
-  private call<T>(type: string, payload: Record<string, unknown>, timeoutMs = this.defaultTimeoutMs): Promise<T> {
+  private call<T>(
+    type: string,
+    payload: Record<string, unknown>,
+    timeoutMs = this.defaultTimeoutMs,
+    onStart?: (id: number) => void,
+  ): Promise<T> {
     const id = this.nextId++
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new HitchfinError(`${type} timed out after ${timeoutMs}ms`, 'TIMEOUT'))
+        this.maybeRecycle()
       }, timeoutMs)
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
@@ -305,6 +335,7 @@ export class ChannelWorkerHost {
         timer,
         label: type,
       })
+      onStart?.(id)
       try {
         this.send({ id, type, ...payload })
       } catch (error) {
@@ -315,6 +346,7 @@ export class ChannelWorkerHost {
             ? error
             : new HitchfinError(errorMessage(error), 'CHANNEL_ERROR'),
         )
+        this.maybeRecycle()
       }
     })
   }
@@ -389,42 +421,68 @@ export class ChannelWorkerHost {
     code?: string,
     proxy?: string,
   ): Promise<ChannelAuthResult> {
-    return this.call(
-      'callback',
-      { channel, session, code: code ?? '', ...(proxy ? { proxy } : {}) },
-      15 * 60_000,
-    )
+    let callId: number | undefined
+    try {
+      return await this.call(
+        'callback',
+        { channel, session, code: code ?? '', ...(proxy ? { proxy } : {}) },
+        AUTH_CALL_TIMEOUT_MS,
+        (id) => {
+          callId = id
+          this.authCallIds.set(session, id)
+        },
+      )
+    } finally {
+      if (callId !== undefined && this.authCallIds.get(session) === callId) {
+        this.authCallIds.delete(session)
+      }
+    }
   }
 
   cancelAuth(session: string): void {
-    this.send({ type: 'cancelAuth', session })
+    // Fail the pending callback now. Waiting for its fifteen-minute RPC
+    // timeout is what kept a cancelled sign-in (and Trae's loopback server)
+    // alive long after the user gave up.
+    const callId = this.authCallIds.get(session)
+    if (callId !== undefined) {
+      this.authCallIds.delete(session)
+      const pending = this.pending.get(callId)
+      if (pending) {
+        clearTimeout(pending.timer)
+        this.pending.delete(callId)
+        pending.reject(new HitchfinError('sign-in cancelled', 'ABORTED'))
+      }
+    }
+    try {
+      this.send({ type: 'cancelAuth', session })
+    } catch {
+      // The worker is already gone; there is nothing left to cancel.
+    }
     // Trae's browser sign-in opens a loopback callback server. Aborting its
     // signal is not enough to release that server, so recycle the worker once
-    // the cancel message has been delivered and no streams or RPC calls are active.
-    const startedAt = Date.now()
-    const isIdle = () => this.streams.size === 0 && this.pending.size === 0
+    // the cancel message has been delivered and no streams or RPC calls are
+    // active. If work is still running, remember to recycle as soon as it ends.
     const timer = setTimeout(() => {
       if (this.disposed) return
-      if (isIdle()) {
+      if (this.streams.size === 0 && this.pending.size === 0) {
         void this.restart()
-        return
+      } else {
+        this.recycleAfterIdle = true
       }
-      const check = setInterval(() => {
-        if (this.disposed) {
-          clearInterval(check)
-          return
-        }
-        const timedOut = Date.now() - startedAt > CANCEL_AUTH_MAX_WAIT_MS
-        if (!isIdle() && !timedOut) return
-        clearInterval(check)
-        if (!this.disposed && isIdle()) void this.restart()
-      }, 1000)
-      check.unref?.()
     }, 500)
     timer.unref?.()
   }
 
+  /** Recycle a worker that was waiting for in-flight work when auth was cancelled. */
+  private maybeRecycle(): void {
+    if (!this.recycleAfterIdle || this.disposed) return
+    if (this.streams.size > 0 || this.pending.size > 0) return
+    this.recycleAfterIdle = false
+    void this.restart()
+  }
+
   async restart(): Promise<void> {
+    this.recycleAfterIdle = false
     const worker = this.worker
     this.worker = null
     if (worker) {
@@ -457,7 +515,11 @@ export class ChannelWorkerHost {
 
       const onAbort = () => {
         state.cleanup?.()
-        this.send({ type: 'cancelFetch', id })
+        try {
+          this.send({ type: 'cancelFetch', id })
+        } catch {
+          // The worker is already gone; the consumer still needs the abort.
+        }
         const error = new HitchfinError('request aborted', 'ABORTED')
         if (state.headSettled) {
           try {
@@ -469,6 +531,7 @@ export class ChannelWorkerHost {
           state.headReject(error)
         }
         this.streams.delete(id)
+        this.maybeRecycle()
       }
       if (init.signal) {
         if (init.signal.aborted) {
@@ -506,12 +569,15 @@ export class ChannelWorkerHost {
             ? error
             : new HitchfinError(errorMessage(error), 'CHANNEL_ERROR'),
         )
+        this.maybeRecycle()
       }
     })
   }
 
   async stop(): Promise<void> {
     this.disposed = true
+    this.recycleAfterIdle = false
+    this.authCallIds.clear()
     const worker = this.worker
     this.worker = null
     const stoppedError = new HitchfinError('channel worker stopped', 'WORKER_STOPPED')
@@ -535,7 +601,7 @@ export class ChannelWorkerHost {
     this.streams.clear()
     if (worker) {
       this.expectedExits.add(worker)
-      await worker.terminate()
+      await worker.terminate().catch(() => {})
     }
   }
 

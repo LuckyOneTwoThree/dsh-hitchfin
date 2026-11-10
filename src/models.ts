@@ -97,15 +97,27 @@ export interface VisibleModelSelection<T> {
  * One shared visibility calculation for both the settings page and the DSH
  * model catalog. Hiding a canonical name removes every alias id at once, so
  * the order of filtering and name dedupe can no longer change the outcome.
+ *
+ * `unknownFreeAsPaid` covers a channel that normally publishes free metadata
+ * but whose listing just failed (or returned a static fallback). Under
+ * free-only we then cannot prove a model is free, so it is hidden instead of
+ * silently offering a paid model. Channels that never publish this metadata
+ * (Trae) keep showing every model, as documented.
  */
 export function selectVisibleModels<T extends NamedModel>(
   raw: readonly T[],
   hidden: ReadonlySet<string>,
   freeOnly: boolean,
+  unknownFreeAsPaid = false,
 ): VisibleModelSelection<T> {
   const hasFreeMetadata = raw.some((model) => model.freeKnown)
-  const usable =
-    freeOnly && hasFreeMetadata ? raw.filter((model) => model.freeKnown && model.free) : raw
+  const usable = freeOnly
+    ? hasFreeMetadata
+      ? raw.filter((model) => model.freeKnown && model.free)
+      : unknownFreeAsPaid
+        ? []
+        : raw
+    : raw
   const hiddenNames = resolveHiddenNames(raw, hidden)
   const candidates = usable.filter(
     (model) => !hiddenNames.has(normalizedModelName(model.name)),

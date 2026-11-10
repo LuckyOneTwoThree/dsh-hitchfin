@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { AccountStore, labelFromAuth } from '../lib/accounts/store.js'
+import { AccountStore, isValidAccountId, labelFromAuth } from '../lib/accounts/store.js'
 
 function fakeCredentials() {
   const records = new Map()
@@ -44,6 +44,15 @@ test('labelFromAuth masks the signed-in identity', () => {
   assert.equal(labelFromAuth('WorkBuddy CN', { accountId: 'short' }), 'WorkBuddy CN · short')
   assert.equal(labelFromAuth('WorkBuddy CN', {}), 'WorkBuddy CN')
   assert.equal(labelFromAuth('WorkBuddy CN', undefined), 'WorkBuddy CN')
+})
+
+test('store refuses an account id that would produce an invalid credential key', async () => {
+  const store = new AccountStore(fakeCredentials())
+  assert.equal(isValidAccountId('acct-1'), true)
+  assert.equal(isValidAccountId('BAD_ID'), false)
+  assert.equal(isValidAccountId('a/b'), false)
+  await assert.rejects(() => store.save(account('BAD_ID')), /malformed credential key/)
+  await assert.rejects(() => store.save(account('a/b')), /malformed credential key/)
 })
 
 test('store keeps multiple accounts per channel and allocates the next id', async () => {
