@@ -2398,7 +2398,14 @@ export function HitchfinSettings() {
                       ) : null}
                       {planLabel ? <span className="hf-mini-tag plan">{planLabel}</span> : null}
                     </div>
-                    {account.error ? (
+                    {account.enabled === false ? (
+                      <div className="hf-account-sub">
+                        {T(
+                          '账号已停用；启用后恢复模型与额度',
+                          'Account disabled; enable it to restore models and usage',
+                        )}
+                      </div>
+                    ) : account.error ? (
                       <div className="hf-account-error" role="alert">
                         <IconAlert />
                         <span>{account.error}</span>

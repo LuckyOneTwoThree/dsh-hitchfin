@@ -161,6 +161,11 @@ function failureOf(error: unknown, signal?: AbortSignal): LlmFailure {
  */
 export class HitchfinAdapter implements HitchfinLlmAdapter {
   private readonly cache = new Map<string, ModelCacheEntry>()
+  /** provider -> listing already in flight, shared by concurrent callers. */
+  private readonly inflightListings = new Map<
+    string,
+    Promise<readonly LlmModelInfo[]>
+  >()
   private readonly cooldowns = new Map<string, CooldownState>()
   private readonly sticky = new Map<string, string>()
   /** provider + model -> request/stream protocol, filled while listing models. */
@@ -185,6 +190,7 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
   invalidate(provider?: string): void {
     if (provider) {
       this.cache.delete(provider)
+      this.inflightListings.delete(provider)
       this.incompleteProviders.delete(provider)
       this.completeCatalogs.delete(provider)
       this.incompleteAttempts.delete(provider)
@@ -201,6 +207,7 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       }
     } else {
       this.cache.clear()
+      this.inflightListings.clear()
       this.incompleteProviders.clear()
       this.completeCatalogs.clear()
       this.incompleteAttempts.clear()
@@ -406,6 +413,23 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       return cached.models
     }
 
+    const existing = this.inflightListings.get(provider)
+    if (existing) return existing
+
+    let loading: Promise<readonly LlmModelInfo[]>
+    loading = this.loadModels(provider, descriptor).finally(() => {
+      if (this.inflightListings.get(provider) === loading) {
+        this.inflightListings.delete(provider)
+      }
+    })
+    this.inflightListings.set(provider, loading)
+    return loading
+  }
+
+  private async loadModels(
+    provider: string,
+    descriptor: ChannelDescriptor,
+  ): Promise<readonly LlmModelInfo[]> {
     const loadInfo = this.options.registry.loadInfo(descriptor)
     if (!loadInfo) {
       this.options.logger.warn(

@@ -137,7 +137,7 @@ function makeRes() {
   }
 }
 
-async function stateFor(hiddenTokens) {
+async function stateFor(hiddenTokens, extraAccounts = [], modelsFor = async () => catalog) {
   let handler
   const account = {
     channelId: descriptor.id,
@@ -162,6 +162,7 @@ async function stateFor(hiddenTokens) {
       return undefined
     },
   }
+  const accounts = [account, ...extraAccounts]
   const services = {
     registry: {
       all: () => [descriptor],
@@ -174,9 +175,9 @@ async function stateFor(hiddenTokens) {
       get: (provider) => (provider === descriptor.providerId ? descriptor : undefined),
       providerIds: () => [descriptor.providerId],
     },
-    accounts: { list: async () => [account] },
+    accounts: { list: async () => accounts },
     worker: {
-      models: async () => catalog,
+      models: modelsFor,
       usage: async () => ({}),
       authorize: async () => ({}),
       callback: async () => ({ auth: {} }),
@@ -206,6 +207,34 @@ test('/state hides the name group and reports canonical hidden names', async () 
   assert.deepEqual(channel.hiddenModels, [NAME.toLowerCase()])
   assert.equal(channel.allModels.some((m) => m.name === NAME), true)
   assert.equal(channel.freeMetadataExpected, false)
+})
+
+test('/state does not query or list a disabled account', async () => {
+  const calls = []
+  const channel = await stateFor(
+    [],
+    [
+      {
+        channelId: descriptor.id,
+        accountId: 'acct-2',
+        label: 'disabled',
+        auth: { type: 'oauth', access: 'token-2' },
+        freeOnly: false,
+        enabled: false,
+        createdAt: 0,
+        updatedAt: 0,
+      },
+    ],
+    async ({ accountId }) => {
+      calls.push(accountId)
+      return accountId === 'acct-2'
+        ? [{ id: 'disabled-only', name: 'Disabled Only', free: false, freeKnown: true, input: ['text'], efforts: [] }]
+        : catalog
+    },
+  )
+  assert.equal(calls.includes('acct-2'), false)
+  assert.equal(channel.allModels.some((model) => model.id === 'disabled-only'), false)
+  assert.equal(channel.accounts.find((entry) => entry.accountId === 'acct-2').enabled, false)
 })
 
 test('/state still honours legacy id tokens', async () => {

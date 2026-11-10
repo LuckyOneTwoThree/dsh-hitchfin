@@ -213,6 +213,34 @@ test('channel adapter filters paid models by default and maps metadata', async (
   assert.deepEqual(models[0].reasoning?.efforts.map((effort) => effort.id), ['low', 'high'])
 })
 
+test('concurrent model listings share one worker call', async () => {
+  const account = {
+    channelId: descriptor.id,
+    accountId: 'acct-1',
+    label: 'Test',
+    auth: { type: 'oauth', access: 'token' },
+    freeOnly: false,
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  let calls = 0
+  const worker = {
+    models: async () => {
+      calls += 1
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      return makeWorker().models()
+    },
+    fetch: async () => sseResponse(),
+  }
+  const adapter = makeAdapter({ accounts: makeAccounts([account]), worker })
+  const [left, right] = await Promise.all([
+    adapter.listModels(descriptor.providerId),
+    adapter.listModels(descriptor.providerId),
+  ])
+  assert.equal(calls, 1)
+  assert.deepEqual(left.map((model) => model.id), right.map((model) => model.id))
+})
+
 test('channel adapter streams through the worker SSE proxy', async () => {
   const account = {
     channelId: descriptor.id,

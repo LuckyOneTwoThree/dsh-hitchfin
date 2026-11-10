@@ -24,7 +24,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
   <img src="https://img.shields.io/badge/version-0.4.5-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-105%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-109%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 

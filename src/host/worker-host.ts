@@ -82,6 +82,7 @@ interface StreamState {
   queued: Uint8Array[]
   ended: boolean
   cleanup?: () => void
+  idleTimer?: NodeJS.Timeout
 }
 
 export interface ChannelWorkerHostOptions {
@@ -89,6 +90,8 @@ export interface ChannelWorkerHostOptions {
   onAuthChanged?: (channelId: string, accountId: string, auth: unknown) => void | Promise<void>
   onAudit?: (event: { channelId: string; packagePath: string }) => void
   defaultTimeoutMs?: number
+  /** Abort a response body that produces no chunk for this long. */
+  streamIdleTimeoutMs?: number
 }
 
 const CRASH_WINDOW_MS = 30_000
@@ -96,6 +99,8 @@ const CRASH_THRESHOLD = 3
 const CIRCUIT_MS = 30_000
 /** Long enough for a browser sign-in, short enough to stop a leaked attempt. */
 const AUTH_CALL_TIMEOUT_MS = 15 * 60_000
+/** A stalled vendor connection must not hold a turn open forever. */
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000
 
 function bytesFromBase64(data: string): Uint8Array {
   return Uint8Array.from(Buffer.from(data, 'base64'))
@@ -132,6 +137,7 @@ export class ChannelWorkerHost {
   /** worker auth session -> pending callback RPC id */
   private readonly authCallIds = new Map<string, number>()
   private readonly defaultTimeoutMs: number
+  private readonly streamIdleTimeoutMs: number
   private readonly expectedExits = new WeakSet<Worker>()
   private crashCount = 0
   private lastCrashAt = 0
@@ -142,6 +148,7 @@ export class ChannelWorkerHost {
 
   constructor(private readonly options: ChannelWorkerHostOptions = {}) {
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 30_000
+    this.streamIdleTimeoutMs = options.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
   }
 
   /** Stop rebuilding a worker that keeps dying instead of hammering the host. */
@@ -228,6 +235,7 @@ export class ChannelWorkerHost {
     if (stream) {
       if (message.type === 'head') {
         stream.headSettled = true
+        this.armStreamIdle(id, stream)
         const status = typeof message.status === 'number' ? message.status : 200
         const headers = new Headers(
           message.headers && typeof message.headers === 'object'
@@ -242,6 +250,7 @@ export class ChannelWorkerHost {
           },
           cancel: () => {
             stream.cleanup?.()
+            this.clearStreamIdle(stream)
             this.streams.delete(id)
             try {
               this.send({ type: 'cancelFetch', id })
@@ -259,6 +268,7 @@ export class ChannelWorkerHost {
       if (message.type === 'chunk') {
         const data = typeof message.data === 'string' ? bytesFromBase64(message.data) : null
         if (!data) return
+        this.armStreamIdle(id, stream)
         if (!stream.headSettled) {
           stream.queued.push(data)
         } else {
@@ -272,6 +282,7 @@ export class ChannelWorkerHost {
       }
       if (message.type === 'end') {
         stream.ended = true
+        this.clearStreamIdle(stream)
         stream.cleanup?.()
         try {
           stream.controller.close()
@@ -286,6 +297,7 @@ export class ChannelWorkerHost {
       }
       if (message.type === 'error') {
         stream.cleanup?.()
+        this.clearStreamIdle(stream)
         this.streams.delete(id)
         const error = workerError(message.error)
         if (!stream.headSettled) {
@@ -481,6 +493,46 @@ export class ChannelWorkerHost {
     void this.restart()
   }
 
+  /** Reset the no-chunk watchdog for one response body. */
+  private armStreamIdle(id: number, stream: StreamState): void {
+    this.clearStreamIdle(stream)
+    if (this.disposed || this.streamIdleTimeoutMs <= 0) return
+    stream.idleTimer = setTimeout(() => this.timeoutStream(id, stream), this.streamIdleTimeoutMs)
+    stream.idleTimer.unref?.()
+  }
+
+  private clearStreamIdle(stream: StreamState): void {
+    if (!stream.idleTimer) return
+    clearTimeout(stream.idleTimer)
+    stream.idleTimer = undefined
+  }
+
+  private timeoutStream(id: number, stream: StreamState): void {
+    if (this.streams.get(id) !== stream) return
+    stream.idleTimer = undefined
+    this.streams.delete(id)
+    stream.cleanup?.()
+    try {
+      this.send({ type: 'cancelFetch', id })
+    } catch {
+      // The worker is already gone; the consumer still needs the timeout.
+    }
+    const error = new HitchfinError(
+      `channel stream idle for ${this.streamIdleTimeoutMs}ms`,
+      'TIMEOUT',
+    )
+    if (stream.headSettled) {
+      try {
+        stream.controller.error(error)
+      } catch {
+        // Already closed.
+      }
+    } else {
+      stream.headReject(error)
+    }
+    this.maybeRecycle()
+  }
+
   async restart(): Promise<void> {
     this.recycleAfterIdle = false
     const worker = this.worker
@@ -512,9 +564,11 @@ export class ChannelWorkerHost {
         ended: false,
       }
       this.streams.set(id, state)
+      this.armStreamIdle(id, state)
 
       const onAbort = () => {
         state.cleanup?.()
+        this.clearStreamIdle(state)
         try {
           this.send({ type: 'cancelFetch', id })
         } catch {
@@ -563,6 +617,7 @@ export class ChannelWorkerHost {
         })
       } catch (error) {
         state.cleanup?.()
+        this.clearStreamIdle(state)
         this.streams.delete(id)
         reject(
           error instanceof Error
@@ -588,6 +643,7 @@ export class ChannelWorkerHost {
     this.pending.clear()
     for (const stream of this.streams.values()) {
       stream.cleanup?.()
+      this.clearStreamIdle(stream)
       if (!stream.headSettled) {
         stream.headReject(stoppedError)
       } else {
@@ -613,6 +669,7 @@ export class ChannelWorkerHost {
     this.pending.clear()
     for (const stream of this.streams.values()) {
       stream.cleanup?.()
+      this.clearStreamIdle(stream)
       if (!stream.headSettled) {
         stream.headReject(error)
       } else {

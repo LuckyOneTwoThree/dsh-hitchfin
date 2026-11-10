@@ -406,7 +406,10 @@ export function registerHitchfinRoutes(
               let raw: readonly ChannelModelRecord[] = []
               let quota: Record<string, unknown> | null = null
               let error: string | undefined
-              if (loadInfo) {
+              // A disabled account keeps its data but is not routed; asking the
+              // vendor for its models or usage would waste calls and could show
+              // models no enabled account can serve.
+              if (loadInfo && account.enabled !== false) {
                 try {
                   raw = await worker.models({
                     channel: loadInfo,

@@ -8,6 +8,7 @@ import { redactError, resolvePackageEntry } from '../worker/channel-contract.mjs
 const crashWorker = new URL('./fixtures/crash-worker.mjs', import.meta.url)
 const auditWorker = new URL('./fixtures/audit-worker.mjs', import.meta.url)
 const authWorker = new URL('./fixtures/auth-worker.mjs', import.meta.url)
+const stallWorker = new URL('./fixtures/stall-worker.mjs', import.meta.url)
 const channel = {
   channelId: 'workbuddy-cn',
   packagePath: '/tmp/mock-channel.mjs',
@@ -226,6 +227,53 @@ test('a stopped host rejects fetch calls without leaking a pending stream', asyn
       return true
     },
   )
+})
+
+test('a stalled response body is aborted by the idle watchdog', async () => {
+  const host = new ChannelWorkerHost({
+    workerPath: stallWorker,
+    streamIdleTimeoutMs: 40,
+  })
+  try {
+    const response = await host.fetch(
+      'http://hitchfin.local/v1/chat/completions',
+      { method: 'POST', body: '{}' },
+      { channel },
+    )
+    assert.equal(response.status, 200)
+    await assert.rejects(
+      () => response.body.getReader().read(),
+      (error) => {
+        assert.equal(error.code, 'TIMEOUT')
+        return true
+      },
+    )
+  } finally {
+    await host.stop()
+  }
+})
+
+test('a channel that never sends headers times out the fetch itself', async () => {
+  const host = new ChannelWorkerHost({
+    workerPath: stallWorker,
+    streamIdleTimeoutMs: 40,
+  })
+  try {
+    await assert.rejects(
+      () =>
+        host.fetch(
+          'http://hitchfin.local/v1/chat/completions',
+          { method: 'POST', body: '{}' },
+          { channel, model: 'no-head' },
+        ),
+      (error) => {
+        assert.equal(error.code, 'TIMEOUT')
+        return true
+      },
+    )
+  } finally {
+    await host.stop()
+  }
 })
 
 test('a worker crash after response headers errors the active ReadableStream instead of hanging', async () => {
