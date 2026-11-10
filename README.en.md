@@ -177,7 +177,7 @@ npm test
 - `src/client/` — native DSH settings section.
 - `tests/` — adapter routing/cooldown/failover, account storage, proxy tunnel, SSE mapping and quota presentation tests.
 
-See [docs/development-plan.md](docs/development-plan.md) for the design notes and verification history. Marketplace submission copy and the release checklist live in [docs/marketplace-listing.md](docs/marketplace-listing.md).
+See [docs/development-plan.md](docs/development-plan.md) for the design notes and verification history. The real-account pre-release smoke checklist lives in [docs/smoke-test.md](docs/smoke-test.md). Marketplace submission copy and the release checklist live in [docs/marketplace-listing.md](docs/marketplace-listing.md).
 
 ## Roadmap
 

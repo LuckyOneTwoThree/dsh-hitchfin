@@ -177,7 +177,7 @@ npm test
 - `src/client/`：DSH 原生设置页。
 - `tests/`：路由/冷却/故障转移、账号存储、代理隧道、SSE 映射与额度展示测试。
 
-设计说明与验证记录见 [docs/development-plan.md](docs/development-plan.md)。插件市场提交文案与发布检查清单见 [docs/marketplace-listing.md](docs/marketplace-listing.md)。
+设计说明与验证记录见 [docs/development-plan.md](docs/development-plan.md)。发布前真实账号冒烟清单见 [docs/smoke-test.md](docs/smoke-test.md)。插件市场提交文案与发布检查清单见 [docs/marketplace-listing.md](docs/marketplace-listing.md)。
 
 ## 路线图
 
