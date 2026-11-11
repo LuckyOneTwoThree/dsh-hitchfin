@@ -1,7 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { QODER_LOGO, TRAE_LOGO, WORKBUDDY_LOGO } from './logos.js'
-import { isModelHidden, looseModelKey, normalizedModelName } from '../models.js'
+import {
+  bulkHiddenTokens,
+  isModelHidden,
+  looseModelKey,
+  normalizedModelName,
+} from '../models.js'
 import { quotaPercent, quotaValue, type QuotaWindowLike } from '../format.js'
+import { CSS } from './styles.js'
 
 export const name = 'dsh-hitchfin'
 
@@ -115,954 +121,7 @@ interface QuotaRow {
   free?: boolean
 }
 
-const CSS = `
-.hf-wrap {
-  --hf-bg: #ffffff;
-  --hf-bg-soft: #f6f6f8;
-  --hf-bg-sunken: #ececef;
-  --hf-text: #1d1d1f;
-  --hf-text-2: #48484d;
-  --hf-muted: #73737a;
-  --hf-faint: #96969d;
-  --hf-border: rgba(29, 29, 31, .10);
-  --hf-border-strong: rgba(29, 29, 31, .17);
-  --hf-hover: rgba(29, 29, 31, .045);
-  --hf-success: #25775d;
-  --hf-danger: #b3261e;
-  --hf-danger-soft: rgba(179, 38, 30, .07);
-  --hf-danger-border: rgba(179, 38, 30, .22);
-  --hf-warning: #946200;
-  --hf-shadow: 0 1px 2px rgba(0, 0, 0, .035), 0 14px 36px rgba(0, 0, 0, .055);
-  --hf-shadow-menu: 0 8px 24px rgba(0, 0, 0, .12);
-  --hf-radius: 16px;
-  --hf-radius-sm: 10px;
-  max-width: 820px;
-  padding: 4px 0 34px;
-  color: var(--hf-text);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
-  font-size: 13px;
-  line-height: 1.45;
-  -webkit-font-smoothing: antialiased;
-}
-.hf-dark {
-  --hf-bg: #1c1c1e;
-  --hf-bg-soft: #242426;
-  --hf-bg-sunken: #2c2c2e;
-  --hf-text: #f5f5f7;
-  --hf-text-2: #d1d1d6;
-  --hf-muted: #a1a1a6;
-  --hf-faint: #8e8e93;
-  --hf-border: rgba(255, 255, 255, .09);
-  --hf-border-strong: rgba(255, 255, 255, .16);
-  --hf-hover: rgba(255, 255, 255, .055);
-  --hf-success: #6fbfa9;
-  --hf-danger: #ff8a80;
-  --hf-danger-soft: rgba(255, 138, 128, .09);
-  --hf-danger-border: rgba(255, 138, 128, .28);
-  --hf-warning: #ffbf69;
-  --hf-shadow: 0 1px 2px rgba(0, 0, 0, .2), 0 16px 40px rgba(0, 0, 0, .22);
-  --hf-shadow-menu: 0 10px 28px rgba(0, 0, 0, .38);
-}
-.hf-wrap * { box-sizing: border-box; }
-.hf-wrap button { font: inherit; }
-.hf-wrap :is(button, a):focus-visible {
-  outline: 2px solid var(--hf-brand, #2d6cdf);
-  outline-offset: 2px;
-}
-.hf-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  margin: 4px 0 16px;
-}
-.hf-title {
-  margin: 0;
-  font-size: 22px;
-  line-height: 1.2;
-  font-weight: 650;
-  letter-spacing: -.022em;
-}
-.hf-subtitle {
-  max-width: 560px;
-  margin: 5px 0 0;
-  color: var(--hf-muted);
-  font-size: 12.5px;
-  line-height: 1.55;
-}
-.hf-privacy {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-  margin-top: 3px;
-  color: var(--hf-muted);
-  font-size: 11px;
-  white-space: nowrap;
-}
-.hf-privacy svg { opacity: .85; }
-.hf-alert {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  margin: 0 0 14px;
-  padding: 10px 11px;
-  border: 1px solid var(--hf-danger-border);
-  border-radius: var(--hf-radius-sm);
-  background: var(--hf-danger-soft);
-  color: var(--hf-danger);
-  font-size: 12px;
-  line-height: 1.5;
-}
-.hf-alert > svg { flex: 0 0 auto; margin-top: 1px; }
-.hf-alert > span { flex: 1; min-width: 0; }
-.hf-alert .hf-btn { flex: 0 0 auto; }
-.hf-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 5px;
-  margin-bottom: 12px;
-  padding: 5px;
-  border: 1px solid var(--hf-border);
-  border-radius: 14px;
-  background: var(--hf-bg-soft);
-}
-.hf-tab {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-  min-height: 50px;
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--hf-text);
-  text-align: left;
-  cursor: pointer;
-  transition: background .18s ease, border-color .18s ease, box-shadow .18s ease;
-}
-.hf-tab:hover { background: var(--hf-hover); }
-.hf-tab.active {
-  border-color: var(--hf-border);
-  background: var(--hf-bg);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .05);
-}
-.hf-logo {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  overflow: hidden;
-  border-radius: 9px;
-  background: #101114;
-  color: #fff;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .1);
-}
-.hf-logo.wb { background: transparent; box-shadow: none; }
-.hf-logo.tab { width: 28px; height: 28px; border-radius: 8px; }
-.hf-logo.header { width: 40px; height: 40px; border-radius: 11px; }
-.hf-logo.empty { width: 52px; height: 52px; margin: 0 auto 12px; border-radius: 14px; }
-.hf-logo.qd, .hf-logo.tr { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .09); }
-.hf-logo-art { display: grid; place-items: center; width: 100%; height: 100%; }
-.hf-logo.qd .hf-logo-art, .hf-logo.tr .hf-logo-art { width: 60%; height: 60%; }
-.hf-logo-art svg { display: block; width: 100% !important; height: 100% !important; }
-.hf-tab:not(.active) .hf-logo { opacity: .72; transition: opacity .18s ease; }
-.hf-tab:hover .hf-logo { opacity: 1; }
-.hf-tab-copy { min-width: 0; flex: 1; }
-.hf-tab-name {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 600;
-  line-height: 1.3;
-}
-.hf-tab-meta {
-  display: block;
-  margin-top: 1px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--hf-muted);
-  font-size: 11px;
-  line-height: 1.35;
-}
-.hf-tab-dot {
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--hf-faint);
-}
-.hf-tab-dot.on { background: var(--hf-success); }
-.hf-tab-dot.pending { background: var(--hf-warning); animation: hf-pulse 1.4s ease-in-out infinite; }
-.hf-tab-dot.error { background: var(--hf-danger); }
-.hf-panel {
-  position: relative;
-  border: 1px solid var(--hf-border);
-  border-radius: var(--hf-radius);
-  background: var(--hf-bg);
-  box-shadow: var(--hf-shadow);
-  animation: hf-panel-in .2s cubic-bezier(.2, .8, .2, 1);
-}
-.hf-panel.wb { --hf-brand: #2d6cdf; --hf-brand-soft: rgba(45, 108, 223, .07); }
-.hf-panel.qd { --hf-brand: #6650cf; --hf-brand-soft: rgba(102, 80, 207, .07); }
-.hf-panel.tr { --hf-brand: #177e6c; --hf-brand-soft: rgba(23, 126, 108, .07); }
-.hf-channel-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 15px 18px;
-  border-bottom: 1px solid var(--hf-border);
-  border-radius: var(--hf-radius) var(--hf-radius) 0 0;
-  background: linear-gradient(180deg, var(--hf-brand-soft), transparent 82%);
-}
-.hf-channel-copy { min-width: 0; flex: 1; }
-.hf-channel-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  font-size: 15px;
-  font-weight: 650;
-  line-height: 1.3;
-  letter-spacing: -.01em;
-}
-.hf-channel-title > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hf-mini-tag {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: 5px;
-  background: var(--hf-bg-sunken);
-  color: var(--hf-muted);
-  font-size: 11px;
-  font-weight: 550;
-  white-space: nowrap;
-}
-.hf-mini-tag.primary { background: var(--hf-brand-soft); color: var(--hf-brand); }
-.hf-mini-tag.plan { background: transparent; box-shadow: inset 0 0 0 1px var(--hf-border); color: var(--hf-muted); }
-.hf-mini-tag.warn { background: rgba(148, 98, 0, .1); color: var(--hf-warning); }
-.hf-channel-meta {
-  margin-top: 2px;
-  color: var(--hf-muted);
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-.hf-channel-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
-.hf-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 0 12px;
-  border: 1px solid var(--hf-border-strong);
-  border-radius: 8px;
-  background: var(--hf-bg);
-  color: var(--hf-text);
-  font-size: 12.5px;
-  font-weight: 550;
-  line-height: 1.2;
-  white-space: nowrap;
-  text-decoration: none;
-  cursor: pointer;
-  transition: background .16s ease, border-color .16s ease, opacity .16s ease, transform .16s ease;
-}
-.hf-btn:hover:not(:disabled) { background: var(--hf-bg-soft); }
-.hf-btn:active:not(:disabled) { transform: translateY(.5px); }
-.hf-btn.primary {
-  border-color: var(--hf-text);
-  background: var(--hf-text);
-  color: var(--hf-bg);
-}
-.hf-btn.primary:hover:not(:disabled) { opacity: .88; background: var(--hf-text); }
-.hf-btn.ghost { border-color: transparent; background: transparent; color: var(--hf-muted); }
-.hf-btn.ghost:hover:not(:disabled) { background: var(--hf-hover); color: var(--hf-text); }
-.hf-btn.danger { border-color: var(--hf-danger-border); background: transparent; color: var(--hf-danger); }
-.hf-btn.danger:hover:not(:disabled) { background: var(--hf-danger-soft); }
-.hf-btn.small { min-height: 27px; padding: 0 9px; font-size: 11.5px; }
-.hf-btn:disabled { opacity: .45; cursor: default; }
-.hf-spinner {
-  width: 12px;
-  height: 12px;
-  border: 1.5px solid currentColor;
-  border-right-color: transparent;
-  border-radius: 50%;
-  animation: hf-spin .7s linear infinite;
-  opacity: .75;
-}
-.hf-empty {
-  padding: 34px 24px 32px;
-  text-align: center;
-}
-.hf-empty-mark {
-  display: grid;
-  place-items: center;
-  width: 48px;
-  height: 48px;
-  margin: 0 auto 12px;
-  border-radius: 14px;
-  background: var(--hf-brand-soft);
-  color: var(--hf-brand);
-}
-.hf-empty h3 {
-  margin: 0;
-  font-size: 15.5px;
-  font-weight: 650;
-  letter-spacing: -.01em;
-}
-.hf-empty p {
-  max-width: 440px;
-  margin: 6px auto 0;
-  color: var(--hf-muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-.hf-methods {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 8px;
-  max-width: 620px;
-  margin: 18px auto 0;
-}
-.hf-method {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-height: 52px;
-  padding: 9px 11px;
-  border: 1px solid var(--hf-border-strong);
-  border-radius: 9px;
-  background: var(--hf-bg);
-  color: var(--hf-text);
-  text-align: left;
-  cursor: pointer;
-  transition: background .16s ease, border-color .16s ease, transform .16s ease;
-}
-.hf-method:hover:not(:disabled) { border-color: var(--hf-brand); background: var(--hf-brand-soft); }
-.hf-method:active:not(:disabled) { transform: translateY(.5px); }
-.hf-method.primary { border-color: var(--hf-text); background: var(--hf-text); color: var(--hf-bg); }
-.hf-method.primary:hover:not(:disabled) { opacity: .88; background: var(--hf-text); border-color: var(--hf-text); }
-.hf-method:disabled { opacity: .45; cursor: default; }
-.hf-method > span { font-size: 12px; font-weight: 600; line-height: 1.35; }
-.hf-method > small { font-size: 11px; line-height: 1.4; opacity: .66; }
-.hf-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  margin: 14px 18px 0;
-  padding: 11px 12px;
-  border: 1px solid var(--hf-border);
-  border-left: 3px solid var(--hf-warning);
-  border-radius: 10px;
-  background: var(--hf-bg-soft);
-}
-.hf-banner.error {
-  border-left-color: var(--hf-danger);
-  background: var(--hf-danger-soft);
-}
-.hf-banner > svg { flex: 0 0 auto; margin-top: 2px; color: var(--hf-warning); }
-.hf-banner.error > svg { color: var(--hf-danger); }
-.hf-banner-body { min-width: 0; flex: 1; }
-.hf-banner-title { font-size: 12.5px; font-weight: 650; line-height: 1.35; }
-.hf-banner-text {
-  margin-top: 2px;
-  color: var(--hf-muted);
-  font-size: 11.5px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-.hf-banner.error .hf-banner-text { color: var(--hf-danger); }
-.hf-banner-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 9px; }
-.hf-code-row { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
-.hf-code-row .hf-input { flex: 1 1 180px; }
-.hf-pulse {
-  display: block;
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  margin-top: 5px;
-  border-radius: 50%;
-  background: var(--hf-warning);
-  animation: hf-pulse 1.4s ease-in-out infinite;
-}
-.hf-form-panel {
-  margin: 14px 18px 0;
-  padding: 12px;
-  border: 1px solid var(--hf-border);
-  border-radius: 11px;
-  background: var(--hf-bg-soft);
-  animation: hf-drop-in .2s cubic-bezier(.2, .8, .2, 1);
-}
-.hf-form-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.hf-form-title { font-size: 12.5px; font-weight: 650; line-height: 1.35; }
-.hf-form-desc { margin-top: 2px; color: var(--hf-muted); font-size: 11.5px; line-height: 1.5; }
-.hf-methods.compact { max-width: none; margin-top: 10px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
-.hf-field { margin-top: 10px; }
-.hf-label {
-  display: block;
-  margin-bottom: 5px;
-  color: var(--hf-text-2);
-  font-size: 11.5px;
-  font-weight: 550;
-}
-.hf-input {
-  width: 100%;
-  height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--hf-border-strong);
-  border-radius: 8px;
-  background: var(--hf-bg);
-  color: var(--hf-text);
-  font: inherit;
-  font-size: 12.5px;
-  outline: none;
-  transition: border-color .16s ease, box-shadow .16s ease;
-}
-.hf-input::placeholder { color: var(--hf-faint); }
-.hf-input:focus {
-  border-color: var(--hf-brand, #2d6cdf);
-  box-shadow: 0 0 0 3px var(--hf-brand-soft, rgba(45, 108, 223, .1));
-}
-.hf-input:disabled { opacity: .55; }
-.hf-inline-input { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.hf-inline-input .hf-input { flex: 1 1 200px; }
-.hf-help { margin: 7px 0 0; color: var(--hf-muted); font-size: 11px; line-height: 1.5; }
-.hf-help a { color: var(--hf-muted); text-decoration: underline; text-underline-offset: 2px; }
-.hf-field-error { margin: 5px 0 0; color: var(--hf-danger); font-size: 11.5px; line-height: 1.45; }
-.hf-accounts { padding: 0 18px; }
-.hf-account {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px 14px;
-  padding: 15px 0;
-  border-bottom: 1px solid var(--hf-border);
-}
-.hf-account:last-child { border-bottom: 0; }
-.hf-account.off .hf-account-main { opacity: .62; }
-.hf-account-main { min-width: 0; }
-.hf-account-top { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
-.hf-channel-note { margin-top: 6px; color: var(--hf-muted); font-size: 11px; line-height: 1.5; }
-.hf-channel-note.warn { color: var(--hf-warning); }
-.hf-account-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-.hf-account-meta-info { flex: 1 1 auto; min-width: 0; color: var(--hf-muted); font-size: 11px; line-height: 1.5; }
-.hf-account-actions { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
-.hf-account-actions .hf-mini-btn { min-height: 24px; padding: 0 6px; }
-.hf-dot {
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--hf-success);
-}
-.hf-dot.off { background: var(--hf-faint); }
-.hf-dot.warn { background: var(--hf-warning); }
-.hf-account-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.35;
-}
-.hf-account-id {
-  flex: 0 0 auto;
-  color: var(--hf-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  letter-spacing: -.02em;
-}
-.hf-quotas { margin-top: 8px; display: flex; flex-direction: column; gap: 9px; }
-.hf-quota-line {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 11px;
-  line-height: 1.4;
-}
-.hf-quota-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 550;
-  color: var(--hf-text-2);
-}
-.hf-quota-free {
-  display: inline-flex;
-  align-items: center;
-  height: 16px;
-  padding: 0 5px;
-  border-radius: 4px;
-  background: rgba(37, 119, 93, .09);
-  color: var(--hf-success);
-  font-size: 11px;
-  font-weight: 600;
-}
-.hf-quota-value {
-  flex: 0 0 auto;
-  text-align: right;
-  white-space: nowrap;
-  color: var(--hf-text);
-  font-variant-numeric: tabular-nums;
-}
-.hf-quota-amount { font-weight: 600; letter-spacing: -.01em; }
-.hf-quota-reset { color: var(--hf-muted); font-weight: 400; }
-.hf-progress {
-  height: 5px;
-  margin-top: 6px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--hf-bg-sunken);
-}
-.hf-progress > span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--hf-brand);
-  transition: width .35s cubic-bezier(.2, .8, .2, 1);
-}
-.hf-progress.free > span { background: var(--hf-success); }
-.hf-progress.warn > span { background: var(--hf-warning); }
-.hf-progress.full > span { background: var(--hf-danger); }
-.hf-account-sub { margin-top: 3px; color: var(--hf-muted); font-size: 11px; line-height: 1.45; }
-.hf-account-error {
-  display: flex;
-  align-items: flex-start;
-  flex-wrap: wrap;
-  gap: 4px 6px;
-  margin-top: 5px;
-  color: var(--hf-danger);
-  font-size: 11px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-.hf-account-error svg { flex: 0 0 auto; margin-top: 1px; }
-.hf-error-action {
-  min-height: 20px;
-  padding: 0;
-  color: var(--hf-danger);
-  font-size: 11px;
-  font-weight: 600;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-.hf-account-side { display: flex; align-items: flex-start; gap: 6px; }
-.hf-switch {
-  position: relative;
-  flex: 0 0 auto;
-  width: 34px;
-  height: 20px;
-  margin-top: 1px;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  background: var(--hf-bg-sunken);
-  box-shadow: inset 0 0 0 1px var(--hf-border);
-  cursor: pointer;
-  transition: background .18s ease, box-shadow .18s ease;
-}
-.hf-switch:hover:not(:disabled) { box-shadow: inset 0 0 0 1px var(--hf-border-strong); }
-.hf-switch.on { background: var(--hf-brand); box-shadow: inset 0 0 0 1px transparent; }
-.hf-switch-knob {
-  position: absolute;
-  top: 2.5px;
-  left: 2.5px;
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .22);
-  transition: transform .18s cubic-bezier(.2, .8, .2, 1);
-}
-.hf-switch.on .hf-switch-knob { transform: translateX(14px); }
-.hf-switch:disabled { opacity: .4; cursor: default; }
-.hf-reorder {
-  display: inline-flex;
-  align-items: center;
-  height: 24px;
-  border: 1px solid var(--hf-border);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.hf-reorder button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--hf-muted);
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  transition: background .15s ease, color .15s ease;
-}
-.hf-reorder button + button { border-left: 1px solid var(--hf-border); }
-.hf-reorder button:hover:not(:disabled) { background: var(--hf-hover); color: var(--hf-text); }
-.hf-reorder button:disabled { opacity: .3; cursor: default; }
-.hf-mini-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 28px;
-  padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--hf-muted);
-  font-size: 11px;
-  font-weight: 550;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background .16s ease, color .16s ease, border-color .16s ease;
-}
-.hf-mini-btn:hover:not(:disabled) { border-color: var(--hf-border); background: var(--hf-bg-soft); color: var(--hf-text); }
-.hf-mini-btn svg { opacity: .8; }
-.hf-mini-btn .hf-dot { width: 5px; height: 5px; }
-.hf-icon-btn {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--hf-muted);
-  cursor: pointer;
-  transition: background .16s ease, color .16s ease, border-color .16s ease;
-}
-.hf-icon-btn:hover:not(:disabled), .hf-icon-btn[aria-expanded="true"] {
-  border-color: var(--hf-border);
-  background: var(--hf-bg-soft);
-  color: var(--hf-text);
-}
-.hf-icon-btn:disabled { opacity: .4; cursor: default; }
-.hf-menu {
-  position: absolute;
-  z-index: 20;
-  top: 42px;
-  right: 0;
-  min-width: 158px;
-  padding: 5px;
-  border: 1px solid var(--hf-border);
-  border-radius: 10px;
-  background: var(--hf-bg);
-  box-shadow: var(--hf-shadow-menu);
-  animation: hf-drop-in .16s cubic-bezier(.2, .8, .2, 1);
-}
-.hf-menu > button {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  min-height: 30px;
-  padding: 0 9px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--hf-text);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-.hf-menu > button:hover:not(:disabled) { background: var(--hf-hover); }
-.hf-menu > button:focus-visible {
-  outline: 2px solid var(--hf-brand, #2d6cdf);
-  outline-offset: -2px;
-}
-.hf-menu > button.danger { color: var(--hf-danger); }
-.hf-menu > button:disabled { opacity: .4; cursor: default; }
-.hf-menu-confirm { padding: 8px 9px 6px; }
-.hf-menu-confirm p { margin: 0 0 9px; color: var(--hf-muted); font-size: 11px; line-height: 1.5; }
-.hf-menu-actions { display: flex; gap: 6px; justify-content: flex-end; }
-.hf-inline-panel {
-  grid-column: 1 / -1;
-  margin-top: 2px;
-  padding: 11px;
-  border: 1px solid var(--hf-border);
-  border-radius: 10px;
-  background: var(--hf-bg-soft);
-  animation: hf-drop-in .18s cubic-bezier(.2, .8, .2, 1);
-}
-.hf-inline-panel .hf-help { margin-top: 6px; }
-.hf-prefs {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  margin-top: 2px;
-  border-top: 1px solid var(--hf-border);
-}
-.hf-pref {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  min-height: 64px;
-  padding: 11px 18px;
-}
-.hf-pref + .hf-pref { border-left: 1px solid var(--hf-border); }
-.hf-pref-copy { min-width: 0; }
-.hf-pref-title { font-size: 12px; font-weight: 600; line-height: 1.35; }
-.hf-pref-desc { margin-top: 2px; color: var(--hf-muted); font-size: 11px; line-height: 1.45; }
-.hf-switch {
-  position: relative;
-  flex: 0 0 auto;
-  width: 40px;
-  height: 24px;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  background: var(--hf-bg-sunken);
-  cursor: pointer;
-  transition: background .18s ease;
-}
-.hf-switch.on { background: var(--hf-success); }
-.hf-switch:disabled { opacity: .45; cursor: default; }
-.hf-switch-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .2);
-  transition: transform .18s cubic-bezier(.2, .8, .2, 1);
-}
-.hf-switch.on .hf-switch-knob { transform: translateX(16px); }
-.hf-models-panel {
-  padding: 14px 18px 16px;
-  border-top: 1px solid var(--hf-border);
-  animation: hf-drop-in .2s cubic-bezier(.2, .8, .2, 1);
-}
-.hf-models-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.hf-models-title { font-size: 12px; font-weight: 600; line-height: 1.35; }
-.hf-models-sub { margin-top: 2px; color: var(--hf-muted); font-size: 11px; line-height: 1.45; }
-.hf-model-tools { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-.hf-search {
-  position: relative;
-  display: flex;
-  align-items: center;
-  flex: 1 1 210px;
-  min-width: 150px;
-}
-.hf-search > svg { position: absolute; left: 9px; color: var(--hf-faint); pointer-events: none; }
-.hf-search .hf-input { height: 32px; padding-left: 29px; padding-right: 28px; }
-.hf-search-clear {
-  position: absolute;
-  right: 4px;
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--hf-faint);
-  cursor: pointer;
-}
-.hf-search-clear:hover { background: var(--hf-hover); color: var(--hf-text); }
-.hf-link-btn {
-  min-height: 28px;
-  padding: 0 6px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--hf-muted);
-  font-size: 11px;
-  font-weight: 550;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.hf-link-btn:hover:not(:disabled) { background: var(--hf-hover); color: var(--hf-text); }
-.hf-link-btn:disabled { opacity: .4; cursor: default; }
-.hf-model-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1px 14px;
-  max-height: 264px;
-  margin-top: 7px;
-  overflow: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-}
-.hf-model-item {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 0 3px;
-  border-bottom: 1px solid var(--hf-border);
-  color: var(--hf-text);
-  cursor: pointer;
-  user-select: none;
-}
-.hf-model-item:hover { background: var(--hf-hover); }
-.hf-model-item input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  pointer-events: none;
-}
-.hf-check {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 15px;
-  height: 15px;
-  border: 1px solid var(--hf-border-strong);
-  border-radius: 4px;
-  background: var(--hf-bg);
-  color: transparent;
-  transition: background .16s ease, border-color .16s ease, color .16s ease;
-}
-.hf-model-item input:checked + .hf-check { border-color: var(--hf-brand); background: var(--hf-brand); color: #fff; }
-.hf-model-item input:focus-visible + .hf-check { outline: 2px solid var(--hf-brand); outline-offset: 2px; }
-.hf-model-item.off .hf-model-name { color: var(--hf-faint); }
-.hf-model-item.filtered { opacity: .62; }
-.hf-filter-note {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 8px;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: rgba(148, 98, 0, .07);
-  color: var(--hf-muted);
-  font-size: 11px;
-  line-height: 1.45;
-}
-.hf-models-warn {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  margin-top: 10px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: rgba(148, 98, 0, .09);
-  color: var(--hf-muted);
-  font-size: 11px;
-  line-height: 1.5;
-}
-.hf-pref-desc .hf-mini-tag { margin-right: 6px; }
-.hf-model-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11.5px;
-}
-.hf-model-tag {
-  flex: 0 0 auto;
-  color: var(--hf-muted);
-  font-size: 11px;
-  font-weight: 550;
-}
-.hf-model-tag.free { color: var(--hf-success); }
-.hf-empty-line { margin: 14px 0 2px; color: var(--hf-faint); font-size: 11.5px; text-align: center; }
-.hf-foot {
-  margin: 14px 2px 0;
-  color: var(--hf-faint);
-  font-size: 11px;
-  line-height: 1.55;
-}
-.hf-toast {
-  position: fixed;
-  z-index: 80;
-  left: 50%;
-  bottom: 28px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: min(420px, calc(100vw - 40px));
-  padding: 9px 13px;
-  border: 1px solid rgba(255, 255, 255, .12);
-  border-radius: 10px;
-  background: var(--hf-text);
-  color: var(--hf-bg);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .22);
-  font-size: 12px;
-  line-height: 1.35;
-  transform: translateX(-50%);
-  animation: hf-toast-in .2s cubic-bezier(.2, .8, .2, 1);
-}
-.hf-toast.error { background: var(--hf-danger); color: #fff; }
-.hf-toast svg { flex: 0 0 auto; }
-.hf-skeleton-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; padding: 5px; border: 1px solid var(--hf-border); border-radius: 14px; background: var(--hf-bg-soft); }
-.hf-skel {
-  overflow: hidden;
-  border-radius: 8px;
-  background: var(--hf-bg-sunken);
-  position: relative;
-}
-.hf-skel::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .28), transparent);
-  transform: translateX(-100%);
-  animation: hf-shimmer 1.3s ease-in-out infinite;
-}
-.hf-dark .hf-skel::after { background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .07), transparent); }
-.hf-skel-tab { height: 50px; }
-.hf-panel-skeleton { margin-top: 12px; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
-.hf-skel-head { width: 42%; height: 38px; }
-.hf-skel-row { width: 100%; height: 54px; }
-.hf-skel-row.short { width: 72%; }
-@keyframes hf-panel-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
-@keyframes hf-drop-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
-@keyframes hf-toast-in { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
-@keyframes hf-spin { to { transform: rotate(360deg); } }
-@keyframes hf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-@keyframes hf-shimmer { 100% { transform: translateX(100%); } }
-@media (max-width: 640px) {
-  .hf-head { gap: 12px; }
-  .hf-methods { grid-template-columns: 1fr; max-width: 360px; }
-  .hf-privacy { display: none; }
-  .hf-tab { flex-direction: column; align-items: flex-start; gap: 5px; padding: 9px 7px; min-height: 66px; }
-  .hf-tab-copy { width: 100%; }
-  .hf-tab-meta { display: none; }
-  .hf-tab-dot { position: absolute; top: 12px; right: 10px; }
-  .hf-tab { position: relative; }
-  .hf-channel-head { flex-wrap: wrap; align-items: flex-start; }
-  .hf-channel-actions { width: 100%; margin-top: 2px; }
-  .hf-channel-actions .hf-btn { width: 100%; }
-  .hf-account { grid-template-columns: minmax(0, 1fr); }
-  .hf-account-main { padding-right: 42px; }
-  .hf-account-side { position: absolute; top: 14px; right: 0; margin-top: 0; }
-  .hf-prefs { grid-template-columns: 1fr; }
-  .hf-pref + .hf-pref { border-top: 1px solid var(--hf-border); border-left: 0; }
-  .hf-model-grid { grid-template-columns: 1fr; }
-  .hf-menu { top: 38px; }
-  .hf-quota-line { flex-wrap: wrap; gap: 2px 12px; }
-  .hf-quota-value { width: 100%; text-align: left; white-space: normal; }
-  .hf-quota-amount { white-space: nowrap; }
-  .hf-account-actions { flex-wrap: wrap; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .hf-wrap *, .hf-wrap *::before, .hf-wrap *::after {
-    animation-duration: .01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: .01ms !important;
-  }
-}
-`
+
 
 function isZh(): boolean {
   const lang = typeof document !== 'undefined' ? document.documentElement.lang : ''
@@ -1272,6 +331,46 @@ function IconLink() {
     <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M10.5 13.5a4 4 0 0 0 5.7 0l2-2a4 4 0 0 0-5.7-5.7l-1.1 1.1" />
       <path d="M13.5 10.5a4 4 0 0 0-5.7 0l-2 2a4 4 0 0 0 5.7 5.7l1.1-1.1" />
+    </svg>
+  )
+}
+
+/** Small line icons for the at-a-glance status strip. */
+function OverviewIcon({ kind }: { kind: 'channels' | 'accounts' | 'models' }) {
+  const shared = {
+    width: 17,
+    height: 17,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.8,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    'aria-hidden': true,
+  }
+  if (kind === 'channels') {
+    return (
+      <svg {...shared}>
+        <rect x="3" y="4" width="7" height="7" rx="1.6" />
+        <rect x="14" y="4" width="7" height="7" rx="1.6" />
+        <rect x="3" y="14" width="7" height="6" rx="1.6" />
+        <rect x="14" y="14" width="7" height="6" rx="1.6" />
+      </svg>
+    )
+  }
+  if (kind === 'accounts') {
+    return (
+      <svg {...shared}>
+        <circle cx="9" cy="8" r="3.2" />
+        <path d="M3.5 19c.4-3.2 2.5-5 5.5-5s5.1 1.8 5.5 5" />
+        <path d="M16 5.5a3 3 0 0 1 0 5.6M17.5 14.4c2 .6 3.1 2.2 3.3 4.6" />
+      </svg>
+    )
+  }
+  return (
+    <svg {...shared}>
+      <path d="M12 3.5 4.5 7.6v8.8L12 20.5l7.5-4.1V7.6L12 3.5Z" />
+      <path d="m4.5 7.6 7.5 4.2 7.5-4.2M12 11.8v8.7" />
     </svg>
   )
 }
@@ -1539,6 +638,15 @@ export function HitchfinSettings() {
   const hiddenCount = channel
     ? channel.allModels.filter((model) => isModelHidden(model, hiddenSet)).length
     : 0
+  // At-a-glance state across every channel, not just the selected tab.
+  const overview = channels
+    ? {
+        connected: channels.filter((entry) => entry.accounts.length > 0).length,
+        total: channels.length,
+        accounts: channels.reduce((sum, entry) => sum + entry.accounts.length, 0),
+        models: channels.reduce((sum, entry) => sum + Math.max(0, entry.modelCount), 0),
+      }
+    : null
   const channelLogin = login && channel && login.channelId === channel.id ? login : null
   const loginPending = Boolean(
     channelLogin && (channelLogin.status === 'pending' || channelLogin.status === 'code'),
@@ -1905,20 +1013,39 @@ export function HitchfinSettings() {
     }
   }
 
-  const showAllModels = (target: Channel) => {
-    void persistHidden(target, [], [...(target.hiddenModels ?? [])], T('已显示全部模型', 'All models shown'))
+  const setModelsVisible = (
+    target: Channel,
+    models: Model[],
+    action: 'show' | 'hide',
+  ) => {
+    if (modelBusy || models.length === 0) return
+    const previous = [...(target.hiddenModels ?? [])]
+    const next = bulkHiddenTokens(models, previous, action)
+    if (next.length === previous.length) {
+      showToast(
+        'success',
+        action === 'show'
+          ? T('所选模型已全部显示', 'Selected models are already visible')
+          : T('所选模型已全部隐藏', 'Selected models are already hidden'),
+      )
+      return
+    }
+    const changed =
+      action === 'show' ? previous.length - next.length : next.length - previous.length
+    void persistHidden(
+      target,
+      next,
+      previous,
+      action === 'show'
+        ? T(`已显示 ${changed} 个模型`, `Showed ${changed} model(s)`)
+        : T(`已隐藏 ${changed} 个模型`, `Hid ${changed} model(s)`),
+    )
   }
 
   const hidePaidModels = (target: Channel) => {
+    if (modelBusy) return
     const previous = [...(target.hiddenModels ?? [])]
-    const next = [
-      ...new Set([
-        ...previous,
-        ...target.allModels
-          .filter((model) => model.freeKnown === true && !model.free)
-          .flatMap((model) => [normalizedModelName(model.name), model.id]),
-      ]),
-    ]
+    const next = bulkHiddenTokens(paidModels, previous, 'hide')
     if (next.length === previous.length) {
       showToast('success', T('没有需要隐藏的付费模型', 'No paid models to hide'))
       return
@@ -2066,6 +1193,34 @@ export function HitchfinSettings() {
       <style>{CSS}</style>
       <PageHeader />
       {error ? <Alert message={error} onClose={() => setError('')} /> : null}
+
+      {overview ? (
+        <div className="hf-overview" aria-label={T('接入概览', 'Bridge overview')}>
+          <div className="hf-overview-item">
+            <span className="hf-overview-mark"><OverviewIcon kind="channels" /></span>
+            <span className="hf-overview-copy">
+              <span className="hf-overview-value">
+                {overview.connected}<small>/{overview.total}</small>
+              </span>
+              <span className="hf-overview-label">{T('已连接渠道', 'Channels connected')}</span>
+            </span>
+          </div>
+          <div className="hf-overview-item">
+            <span className="hf-overview-mark"><OverviewIcon kind="accounts" /></span>
+            <span className="hf-overview-copy">
+              <span className="hf-overview-value">{overview.accounts}</span>
+              <span className="hf-overview-label">{T('已登录账号', 'Signed-in accounts')}</span>
+            </span>
+          </div>
+          <div className="hf-overview-item">
+            <span className="hf-overview-mark"><OverviewIcon kind="models" /></span>
+            <span className="hf-overview-copy">
+              <span className="hf-overview-value">{overview.models}</span>
+              <span className="hf-overview-label">{T('可用模型', 'Available models')}</span>
+            </span>
+          </div>
+        </div>
+      ) : null}
 
       <div className="hf-tabs" role="tablist" aria-label={T('渠道', 'Channels')}>
         {channels.map((entry) => {
@@ -2594,7 +1749,7 @@ export function HitchfinSettings() {
                           ? T('启用该账号', 'Enable this account')
                           : T('停用该账号，凭据与设置会保留', 'Disable; credentials are kept')
                       }
-                      className={`hf-switch${account.enabled === false ? '' : ' on'}`}
+                      className={`hf-switch compact${account.enabled === false ? '' : ' on'}`}
                       disabled={busy !== ''}
                       title={
                         account.enabled === false
@@ -2906,15 +2061,24 @@ export function HitchfinSettings() {
                       {T(
                         `当前可用 ${visibleTotal} 个 · 已启用 ${channel.allModels.length - hiddenCount} 个${
                           hiddenCount ? ` · 已隐藏 ${hiddenCount} 个` : ''
-                        }`,
+                        }${query ? ` · 搜索匹配 ${shownModels.length} 个` : ''}`,
                         `${visibleTotal} available · ${channel.allModels.length - hiddenCount} enabled${
                           hiddenCount ? ` · ${hiddenCount} hidden` : ''
-                        }`,
+                        }${query ? ` · ${shownModels.length} matched` : ''}`,
                       )}
                     </div>
                   </div>
                   {modelBusy ? <span className="hf-spinner" aria-label={T('保存中', 'Saving')} /> : null}
                 </div>
+                {channel.allModels.length > 0 ? (
+                  <div className="hf-model-progress" aria-hidden="true">
+                    <span
+                      style={{
+                        width: `${Math.round((visibleTotal / channel.allModels.length) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                ) : null}
                 {channel.modelsError ? (
                   <div className="hf-models-warn">
                     <span className="hf-mini-tag warn">{T('目录读取失败', 'Catalog failed')}</span>
@@ -2948,32 +2112,56 @@ export function HitchfinSettings() {
                       </button>
                     ) : null}
                   </div>
-                  <button
-                    type="button"
-                    className="hf-link-btn"
-                    disabled={modelBusy}
-                    onClick={() => void refreshModels(channel)}
-                  >
-                    {T('刷新模型', 'Refresh')}
-                  </button>
-                  <button
-                    type="button"
-                    className="hf-link-btn"
-                    disabled={modelBusy || hiddenCount === 0}
-                    onClick={() => showAllModels(channel)}
-                  >
-                    {T('取消隐藏', 'Clear hidden')}
-                  </button>
-                  {channel.freeStatusKnown && !channel.freeOnly && paidModels.length > 0 ? (
+                  <div className="hf-tool-group">
                     <button
                       type="button"
                       className="hf-link-btn"
                       disabled={modelBusy}
-                      onClick={() => hidePaidModels(channel)}
+                      onClick={() => void refreshModels(channel)}
                     >
-                      {T('隐藏付费', 'Hide paid')}
+                      {T('刷新模型', 'Refresh')}
                     </button>
-                  ) : null}
+                    <button
+                      type="button"
+                      className="hf-link-btn"
+                      disabled={modelBusy || shownModels.length === 0}
+                      title={
+                        query
+                          ? T('只作用于当前搜索结果', 'Applies to the current search results')
+                          : T('全部显示', 'Show every model')
+                      }
+                      onClick={() => setModelsVisible(channel, shownModels, 'show')}
+                    >
+                      {query
+                        ? T(`全选 (${shownModels.length})`, `Select all (${shownModels.length})`)
+                        : T('全选', 'Select all')}
+                    </button>
+                    <button
+                      type="button"
+                      className="hf-link-btn"
+                      disabled={modelBusy || shownModels.length === 0}
+                      title={
+                        query
+                          ? T('只作用于当前搜索结果', 'Applies to the current search results')
+                          : T('全部隐藏', 'Hide every model')
+                      }
+                      onClick={() => setModelsVisible(channel, shownModels, 'hide')}
+                    >
+                      {query
+                        ? T(`全不选 (${shownModels.length})`, `Clear all (${shownModels.length})`)
+                        : T('全不选', 'Clear all')}
+                    </button>
+                    {channel.freeStatusKnown && !channel.freeOnly && paidModels.length > 0 ? (
+                      <button
+                        type="button"
+                        className="hf-link-btn"
+                        disabled={modelBusy}
+                        onClick={() => hidePaidModels(channel)}
+                      >
+                        {T('隐藏付费', 'Hide paid')}
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
                 {channel.freeOnly && channel.freeStatusKnown ? (
                   <div className="hf-filter-note">
