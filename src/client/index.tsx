@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { QODER_LOGO, TRAE_LOGO, WORKBUDDY_LOGO } from './logos.js'
-import { isModelHidden, normalizedModelName } from '../models.js'
+import { isModelHidden, looseModelKey, normalizedModelName } from '../models.js'
 import { quotaPercent, quotaValue, type QuotaWindowLike } from '../format.js'
 
 export const name = 'dsh-hitchfin'
@@ -69,6 +69,8 @@ interface Channel {
   hiddenModels: string[]
   quota?: Quota | null
   modelCount: number
+  /** Set when the live catalog read failed; the list shown may be stale. */
+  modelsError?: string
   freeStatusKnown: boolean
   /** The channel normally publishes free/paid metadata; unknown means hidden under free-only. */
   freeMetadataExpected?: boolean
@@ -945,6 +947,19 @@ const CSS = `
   font-size: 11px;
   line-height: 1.45;
 }
+.hf-models-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(148, 98, 0, .09);
+  color: var(--hf-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.hf-pref-desc .hf-mini-tag { margin-right: 6px; }
 .hf-model-name {
   flex: 1;
   min-width: 0;
@@ -1784,9 +1799,21 @@ export function HitchfinSettings() {
     const previous = [...(target.hiddenModels ?? [])]
     const key = normalizedModelName(model.name)
     const wasHidden = isModelHidden(model, new Set(previous))
-    // Drop both the canonical name and any legacy id so a toggle always flips.
-    const cleaned = previous.filter((token) => token !== key && token !== model.id)
-    void persistHidden(target, wasHidden ? cleaned : [...cleaned, key], previous)
+    // Drop the canonical name, its loose spellings and any legacy id so a
+    // toggle always flips. Store both name and id: a vendor rename must not
+    // bring a hidden model back when the live catalog replaces the fallback.
+    const loose = looseModelKey(key)
+    const cleaned = previous.filter(
+      (token) =>
+        token !== key &&
+        token !== model.id &&
+        looseModelKey(token) !== loose,
+    )
+    void persistHidden(
+      target,
+      wasHidden ? cleaned : [...new Set([...cleaned, key, model.id])],
+      previous,
+    )
   }
 
   const persistEnabled = async (target: Channel, accountId: string, enabled: boolean) => {
@@ -1861,6 +1888,23 @@ export function HitchfinSettings() {
     void persistOrder(target, ordered, target.accounts)
   }
 
+  const refreshModels = async (target: Channel) => {
+    if (modelBusy) return
+    setModelBusy(true)
+    try {
+      await json('/dsh-hitchfin/models/refresh', {
+        method: 'POST',
+        body: JSON.stringify({ channelId: target.id }),
+      })
+      await refresh(true)
+      showToast('success', T('模型目录已刷新', 'Model catalog refreshed'))
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : String(err))
+    } finally {
+      setModelBusy(false)
+    }
+  }
+
   const showAllModels = (target: Channel) => {
     void persistHidden(target, [], [...(target.hiddenModels ?? [])], T('已显示全部模型', 'All models shown'))
   }
@@ -1872,7 +1916,7 @@ export function HitchfinSettings() {
         ...previous,
         ...target.allModels
           .filter((model) => model.freeKnown === true && !model.free)
-          .map((model) => normalizedModelName(model.name)),
+          .flatMap((model) => [normalizedModelName(model.name), model.id]),
       ]),
     ]
     if (next.length === previous.length) {
@@ -2819,6 +2863,9 @@ export function HitchfinSettings() {
                 <div className="hf-pref-copy">
                   <div className="hf-pref-title">{T('模型可见性', 'Model visibility')}</div>
                   <div className="hf-pref-desc">
+                    {channel.modelsError ? (
+                      <span className="hf-mini-tag warn">{T('目录读取失败', 'Catalog failed')}</span>
+                    ) : null}
                     {channel.allModels.length > 0
                       ? T(
                           `${visibleTotal} / ${channel.allModels.length} 可见${hiddenCount ? ` · 已隐藏 ${hiddenCount}` : ''}`,
@@ -2868,6 +2915,17 @@ export function HitchfinSettings() {
                   </div>
                   {modelBusy ? <span className="hf-spinner" aria-label={T('保存中', 'Saving')} /> : null}
                 </div>
+                {channel.modelsError ? (
+                  <div className="hf-models-warn">
+                    <span className="hf-mini-tag warn">{T('目录读取失败', 'Catalog failed')}</span>
+                    <span>
+                      {T(
+                        '实时模型目录未读取成功，当前显示的是上次成功的目录。点「刷新模型」重试。',
+                        'The live catalog could not be read; the last good one is shown. Use Refresh to retry.',
+                      )}
+                    </span>
+                  </div>
+                ) : null}
                 <div className="hf-model-tools">
                   <div className="hf-search">
                     <IconSearch />
@@ -2890,6 +2948,14 @@ export function HitchfinSettings() {
                       </button>
                     ) : null}
                   </div>
+                  <button
+                    type="button"
+                    className="hf-link-btn"
+                    disabled={modelBusy}
+                    onClick={() => void refreshModels(channel)}
+                  >
+                    {T('刷新模型', 'Refresh')}
+                  </button>
                   <button
                     type="button"
                     className="hf-link-btn"

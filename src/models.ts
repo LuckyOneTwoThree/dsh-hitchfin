@@ -13,12 +13,27 @@ export function normalizedModelName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
+/**
+ * Separator-insensitive name key. Vendors rename the same model between
+ * catalog reads (`Kimi K2.6` in the static fallback, `Kimi-K2.6` live), so a
+ * hidden name stored against one spelling must still hide the other.
+ */
+export function looseModelKey(value: string): string {
+  return normalizedModelName(value).replace(/[^a-z0-9]+/g, '')
+}
+
 /** A hidden entry may be a canonical name (current) or a legacy model id. */
 export function isModelHidden(
   model: Pick<NamedModel, 'id' | 'name'>,
   hidden: ReadonlySet<string>,
 ): boolean {
-  return hidden.has(normalizedModelName(model.name)) || hidden.has(model.id)
+  if (hidden.has(normalizedModelName(model.name)) || hidden.has(model.id)) return true
+  const key = looseModelKey(model.name)
+  if (!key) return false
+  for (const token of hidden) {
+    if (looseModelKey(token) === key) return true
+  }
+  return false
 }
 
 /**
@@ -39,14 +54,22 @@ export function resolveHiddenNames(
     knownNames.add(name)
   }
   const names = new Set<string>()
+  const looseNames = [...knownNames].map((name) => [looseModelKey(name), name] as const)
   for (const token of hidden) {
     const byId = idToName.get(token)
     if (byId) {
       names.add(byId)
-    } else {
-      const normalized = normalizedModelName(token)
-      names.add(knownNames.has(normalized) ? normalized : token)
+      continue
     }
+    const normalized = normalizedModelName(token)
+    if (knownNames.has(normalized)) {
+      names.add(normalized)
+      continue
+    }
+    // A name written before a vendor rename maps onto the current spelling.
+    const loose = looseModelKey(token)
+    const match = loose && looseNames.find(([key]) => key === loose)?.[1]
+    names.add(match ?? token)
   }
   return names
 }
@@ -60,14 +83,22 @@ function preference(model: NamedModel): number {
   let score = 0
   if (model.freeKnown && model.free) score += 10_000
   if (model.freeKnown) score += 100
+  // The canonical id usually spells the display name; a routing twin or an
+  // -Official/_advisor_ alias does not. This has to outweigh every other
+  // tiebreaker, or the id DSH actually sends becomes vendor-internal.
+  if (normalizedModelName(model.id) === normalizedModelName(model.name)) score += 500
   if (/-Official/i.test(model.id)) score -= 1_000
   if (/_advisor_/i.test(model.id)) score -= 900
   if (/advisor/i.test(model.id)) score -= 500
   if (/search_agent/i.test(model.id)) score -= 2_000
   if (/Doubao_1_6/i.test(model.id)) score -= 300
+  if (/-auto(?:-max)?$/i.test(model.id)) score -= 800
+  if (/sub_?agent|computer_use|browser_use|explore_|file_search/i.test(model.id)) score -= 800
   score -= model.id.length * 0.01
   if (model.contextWindow !== undefined) {
-    score += Math.min(model.contextWindow, 1_000_000) / 1_000_000 * 10
+    // Tiebreaker only. Trae's -auto twins advertise a larger context window
+    // than the real model; scoring it at up to +10 used to make the twin win.
+    score += Math.min(model.contextWindow, 1_000_000) / 1_000_000
   }
   return score
 }

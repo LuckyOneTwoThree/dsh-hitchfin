@@ -298,6 +298,8 @@ async function handleModels(message) {
     () => staticModels(loaded),
   )
   let models = base
+  let liveFailed = false
+  let liveError
 
   if (message.auth && typeof loaded.hooks?.provider?.models === 'function') {
     const auth = message.auth
@@ -312,13 +314,55 @@ async function handleModels(message) {
         },
         () => loaded.hooks.provider.models({ id: loaded.provider, models: base }, { auth }),
       )
-      if (live && typeof live === 'object' && !Array.isArray(live)) models = live
-    } catch {
-      // A live list may need a network round trip; keep the static fallback.
+      // Every channel package returns the very object we handed in when its
+      // live read fails (`return provider.models`), while a successful read
+      // builds a fresh map. Publishing that placeholder as the account's real
+      // catalog showed a handful of stale models with no error anywhere.
+      if (live && typeof live === 'object' && !Array.isArray(live) && live !== base) {
+        models = live
+      } else {
+        liveFailed = true
+        liveError = 'channel returned its static fallback catalog'
+      }
+    } catch (error) {
+      liveFailed = true
+      liveError = redactError(error)
     }
   }
 
-  return { models: normalizeModels(models) }
+  return {
+    // A failed live read reports an empty catalog plus an explicit failure, so
+    // neither the settings page nor the DSH picker can mistake the built-in
+    // placeholder table for the account's models.
+    models: liveFailed
+      ? []
+      : normalizeModels(models, {
+          filterInternal: message.channel.channelId === 'trae-cn',
+          humanizeEmptyNames: message.channel.channelId === 'trae-cn',
+        }),
+    liveFailed,
+    ...(liveError ? { liveError } : {}),
+  }
+}
+
+/**
+ * Drop this channel's cached plugin instance. The Trae package keeps a failed
+ * model read in a module-scope `readAt` map for five minutes, so a transient
+ * failure would otherwise keep serving the static fallback. Its factory builds
+ * fresh state on every call, which is exactly what a forced refresh needs.
+ */
+function handleReload(message) {
+  const channelId = typeof message.channel?.channelId === 'string' ? message.channel.channelId : ''
+  if (!channelId) return { dropped: 0 }
+  const prefix = `${channelId}\0`
+  let dropped = 0
+  for (const key of channels.keys()) {
+    if (key.startsWith(prefix)) {
+      channels.delete(key)
+      dropped += 1
+    }
+  }
+  return { dropped }
 }
 
 async function handleApiKey(message) {
@@ -602,6 +646,8 @@ async function handle(message) {
       return handleDescribe(message)
     case 'models':
       return handleModels(message)
+    case 'reload':
+      return handleReload(message)
     case 'usage':
       return handleUsage(message)
     case 'authorize':

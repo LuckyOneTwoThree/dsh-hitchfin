@@ -31,11 +31,43 @@ function capabilitiesInput(entry) {
     .map(([modality]) => modality)
 }
 
-export function normalizeModels(models) {
+/**
+ * Trae's live catalog also lists the IDE's own routing twins and sub-agents
+ * (`-auto`, `*_subagent`, `search_agent`, `computer_use`, ...). Trae's own
+ * picker hides them; the channel package's `chatModel` only drops entries the
+ * vendor explicitly marked, so they reached the DSH model picker as if they
+ * were chat models — often with their raw internal id as the display name.
+ */
+const INTERNAL_MODEL_RE =
+  /-auto(?:-max)?$|doubao[-_]for[-_]auto|sub_?agent|search_agent|computer_use|browser_use|explore_|file_search/i
+
+export function isInternalModel(id, name) {
+  return INTERNAL_MODEL_RE.test(String(id)) || INTERNAL_MODEL_RE.test(String(name ?? ''))
+}
+
+/** Give an entry the vendor left nameless (`-`) a readable label. */
+export function humanizeModelId(id) {
+  return String(id)
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+export function normalizeModels(models, options = {}) {
+  const { filterInternal = false, humanizeEmptyNames = false } = options
   const out = []
   if (!models || typeof models !== 'object' || Array.isArray(models)) return out
   for (const [id, entry] of Object.entries(models)) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const rawName = typeof entry.name === 'string' && entry.name ? entry.name : ''
+    let name = rawName || id
+    if (humanizeEmptyNames && (!rawName.trim() || rawName.trim() === '-')) {
+      name = humanizeModelId(id)
+    }
+    if (filterInternal && isInternalModel(id, name)) continue
     const limit = typeof entry.limit === 'object' && entry.limit ? entry.limit : {}
     const modalities = typeof entry.modalities === 'object' && entry.modalities ? entry.modalities : {}
     // Config models carry `modalities`; live OpenCode model records carry the
@@ -52,7 +84,7 @@ export function normalizeModels(models) {
     const npm = modelNpm(entry)
     out.push({
       id,
-      name: typeof entry.name === 'string' && entry.name ? entry.name : id,
+      name,
       ...(npm === ANTHROPIC_NPM || npm === VERTEX_ANTHROPIC_NPM
         ? { protocol: 'anthropic-messages' }
         : {}),

@@ -7,11 +7,12 @@ import { sortAccountsByPriority } from '../accounts/store.js'
 import type { AccountStore, AccountPayload } from '../accounts/store.js'
 import type { ChannelDescriptor } from '../channels/descriptor.js'
 import type { ChannelRegistry } from '../channels/registry.js'
-import type {
-  ChannelCallOptions,
-  ChannelLoadInfo,
-  ChannelModelRecord,
-  ChannelWorkerHost,
+import {
+  readModelListing,
+  type ChannelCallOptions,
+  type ChannelLoadInfo,
+  type ChannelModelRecord,
+  type ChannelWorkerHost,
 } from '../host/worker-host.js'
 import type {
   GenerateOptions,
@@ -51,6 +52,13 @@ interface ModelCacheEntry {
   at: number
   models: readonly LlmResolvedModelInfo[]
 }
+
+/**
+ * Last catalog a complete listing actually produced. A failed live read no
+ * longer publishes the channel's placeholder table; keeping this instead means
+ * a transient vendor hiccup does not empty the DSH model picker mid-session.
+ */
+type CatalogSnapshot = readonly LlmModelInfo[]
 
 interface CooldownState {
   until: number
@@ -178,6 +186,8 @@ function failureOf(error: unknown, signal?: AbortSignal): LlmFailure {
  */
 export class HitchfinAdapter implements HitchfinLlmAdapter {
   private readonly cache = new Map<string, ModelCacheEntry>()
+  /** Last complete, non-empty catalog per provider, used when a live read fails. */
+  private readonly lastGoodModels = new Map<string, CatalogSnapshot>()
   /** provider -> listing already in flight, shared by concurrent callers. */
   private readonly inflightListings = new Map<
     string,
@@ -224,6 +234,7 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       }
     } else {
       this.cache.clear()
+      this.lastGoodModels.clear()
       this.inflightListings.clear()
       this.incompleteProviders.clear()
       this.completeCatalogs.clear()
@@ -248,6 +259,11 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
         this.sticky.delete(key)
       }
     }
+  }
+
+  /** Last known catalog without triggering a vendor read (settings page). */
+  cachedModels(provider: string): CatalogSnapshot {
+    return this.cache.get(provider)?.models ?? this.lastGoodModels.get(provider) ?? []
   }
 
   providerInfo(provider: string): LlmProviderInfo {
@@ -478,14 +494,21 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       const listings = await Promise.all(
         sources.map(async (account): Promise<AccountListing> => {
           try {
-            const models = await this.options.worker.models({
+            const listing = await readModelListing(this.options.worker, {
               channel: loadInfo,
               accountId: account.accountId,
               auth: account.auth,
               freeOnly: account.freeOnly !== false,
               ...(account.proxy ? { proxy: account.proxy } : {}),
             })
-            return { account, models }
+            if (listing.liveFailed) {
+              return {
+                account,
+                models: [],
+                error: listing.error ?? 'live model catalog unavailable',
+              }
+            }
+            return { account, models: listing.models }
           } catch (error) {
             return { account, models: [], error }
           }
@@ -575,17 +598,20 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
         this.incompleteRetryAt.delete(provider)
         this.completeCatalogs.add(provider)
         this.cache.set(provider, { at: Date.now(), models })
-      } else {
-        const attempts = (this.incompleteAttempts.get(provider) ?? 0) + 1
-        this.incompleteAttempts.set(provider, attempts)
-        this.incompleteProviders.add(provider)
-        this.completeCatalogs.delete(provider)
-        // Allow one immediate retry, then stop paying every listing timeout
-        // before each stream for a persistently broken account.
-        this.incompleteRetryAt.set(provider, attempts <= 1 ? 0 : Date.now() + 10_000)
-        this.cache.delete(provider)
+        if (models.length > 0) this.lastGoodModels.set(provider, models)
+        return models
       }
-      return models
+      const attempts = (this.incompleteAttempts.get(provider) ?? 0) + 1
+      this.incompleteAttempts.set(provider, attempts)
+      this.incompleteProviders.add(provider)
+      this.completeCatalogs.delete(provider)
+      // Allow one immediate retry, then stop paying every listing timeout
+      // before each stream for a persistently broken account.
+      this.incompleteRetryAt.set(provider, attempts <= 1 ? 0 : Date.now() + 10_000)
+      this.cache.delete(provider)
+      // A failed live read must not empty the picker (or, worse, publish the
+      // channel's static placeholder table). Keep the last complete catalog.
+      return models.length > 0 ? models : (this.lastGoodModels.get(provider) ?? [])
     } catch (error) {
       this.options.logger.warn(
         `dsh-hitchfin: listing models for ${descriptor.displayName} failed: ${errorMessage(error)}`,

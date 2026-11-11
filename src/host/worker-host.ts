@@ -33,6 +33,32 @@ export interface ChannelModelRecord {
   protocol?: ChannelProtocol
 }
 
+/** A model listing that can tell a real catalog apart from a failed live read. */
+export interface ModelListing {
+  models: readonly ChannelModelRecord[]
+  /** True when the channel package fell back to its built-in placeholder list. */
+  liveFailed: boolean
+  error?: string
+}
+
+/**
+ * Read a catalog through the status-aware host, or through a plain `models`
+ * double (tests and older hosts). Keeping the fallback here lets every caller
+ * share one code path without rewriting their worker stub.
+ */
+export async function readModelListing(
+  worker: Pick<ChannelWorkerHost, 'models'> &
+    Partial<Pick<ChannelWorkerHost, 'listModels'>>,
+  options: ChannelCallOptions,
+  timeoutMs?: number,
+): Promise<ModelListing> {
+  if (typeof worker.listModels === 'function') {
+    return worker.listModels(options, timeoutMs)
+  }
+  const models = await worker.models(options, timeoutMs)
+  return { models, liveFailed: false }
+}
+
 export interface ChannelUsageRecord {
   plan?: string
   user?: string
@@ -436,7 +462,18 @@ export class ChannelWorkerHost {
     options: ChannelCallOptions,
     timeoutMs = this.defaultTimeoutMs,
   ): Promise<readonly ChannelModelRecord[]> {
-    const result = await this.call<{ models?: ChannelModelRecord[] }>(
+    return (await this.listModels(options, timeoutMs)).models
+  }
+
+  async listModels(
+    options: ChannelCallOptions,
+    timeoutMs = this.defaultTimeoutMs,
+  ): Promise<ModelListing> {
+    const result = await this.call<{
+      models?: ChannelModelRecord[]
+      liveFailed?: boolean
+      liveError?: string
+    }>(
       'models',
       {
         channel: options.channel,
@@ -447,7 +484,17 @@ export class ChannelWorkerHost {
       },
       timeoutMs,
     )
-    return result.models ?? []
+    return {
+      models: result.models ?? [],
+      liveFailed: result.liveFailed === true,
+      ...(result.liveError ? { error: result.liveError } : {}),
+    }
+  }
+
+  /** Discard the worker's cached channel-plugin instance so the next read is fresh. */
+  async reloadChannel(channel: ChannelLoadInfo): Promise<number> {
+    const result = await this.call<{ dropped?: number }>('reload', { channel })
+    return result.dropped ?? 0
   }
 
   async usage(options: ChannelCallOptions, timeoutMs = 30_000): Promise<ChannelUsageRecord> {

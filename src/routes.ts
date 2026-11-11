@@ -14,7 +14,11 @@ import {
 import type { ChannelDescriptor } from './channels/descriptor.js'
 import type { ChannelRegistry } from './channels/registry.js'
 import type { HitchfinAdapter } from './adapter/hitchfin-adapter.js'
-import type { ChannelModelRecord, ChannelWorkerHost } from './host/worker-host.js'
+import {
+  readModelListing,
+  type ChannelModelRecord,
+  type ChannelWorkerHost,
+} from './host/worker-host.js'
 import type { HitchfinContext, WebRoute } from './types.js'
 
 const PREFIX = '/dsh-hitchfin'
@@ -424,19 +428,32 @@ export function registerHitchfinRoutes(
               let raw: readonly ChannelModelRecord[] = []
               let quota: Record<string, unknown> | null = null
               let error: string | undefined
+              let liveFailed = false
               // A disabled account keeps its data but is not routed; asking the
               // vendor for its models or usage would waste calls and could show
               // models no enabled account can serve.
               if (loadInfo && account.enabled !== false) {
                 try {
-                  raw = await worker.models({
-                    channel: loadInfo,
-                    accountId: account.accountId,
-                    auth: account.auth,
-                    freeOnly: false,
-                    ...(account.proxy ? { proxy: account.proxy } : {}),
-                  }, 8_000)
+                  const listing = await readModelListing(
+                    worker,
+                    {
+                      channel: loadInfo,
+                      accountId: account.accountId,
+                      auth: account.auth,
+                      freeOnly: false,
+                      ...(account.proxy ? { proxy: account.proxy } : {}),
+                    },
+                    8_000,
+                  )
+                  // Never let a placeholder table through, even if an older
+                  // worker still returns one alongside the failure flag.
+                  raw = listing.liveFailed ? [] : listing.models
+                  if (listing.liveFailed) {
+                    liveFailed = true
+                    error = listing.error ?? 'live model catalog unavailable'
+                  }
                 } catch (cause) {
+                  liveFailed = true
                   error = errorMessage(cause)
                 }
                 if (withQuota) {
@@ -469,6 +486,7 @@ export function registerHitchfinRoutes(
                 candidates: selection.candidates,
                 quota,
                 error,
+                liveFailed,
               }
             }),
           )
@@ -519,6 +537,30 @@ export function registerHitchfinRoutes(
             }
           }
 
+          // A failed live read must not look like a healthy (empty or
+          // placeholder) catalog. Report it, and keep the last good catalog
+          // visible in the settings page so a transient vendor hiccup does not
+          // wipe the user's model list without explanation.
+          const modelsError = views.some((view) => view.liveFailed)
+            ? (views.find((view) => view.error)?.error ?? 'live model catalog unavailable')
+            : undefined
+          if (modelsError && models.length === 0) {
+            try {
+              const cached = adapter.cachedModels(descriptor.providerId)
+              if (cached.length > 0) {
+                models = cached.map((model) => ({
+                  id: model.id,
+                  name: model.name,
+                  free: model.badge?.tone === 'success',
+                }))
+                allModels = models.map((model) => ({ ...model, freeKnown: false }))
+                freeStatusKnown = false
+              }
+            } catch {
+              // The adapter may not have a cached catalog yet.
+            }
+          }
+
           // Channel-level settings describe the accounts that actually route.
           // A disabled account keeps its own copy but must not decide the
           // toggle (or the hidden intersection) for the enabled ones.
@@ -544,6 +586,7 @@ export function registerHitchfinRoutes(
                 }
               : {}),
             freeStatusKnown,
+            ...(modelsError ? { modelsError } : {}),
             freeMetadataExpected: descriptor.supportsFreeWindow,
             freeOnly:
               channelAccounts.length > 0
@@ -932,6 +975,32 @@ export function registerHitchfinRoutes(
         await accounts.setHiddenModels(descriptor.id, accountId, hidden)
       } else {
         await accounts.setChannelHiddenModels(descriptor.id, hidden)
+      }
+      modelsChanged(descriptor)
+      sendJson(res, 200, { ok: true })
+      return
+    }
+
+    // Force a fresh catalog read. The Trae package caches a failed read inside
+    // its plugin instance for five minutes; dropping that instance gives the
+    // next read a clean `readAt` map without restarting the whole worker.
+    if (path === '/models/refresh' && !methodRefused(req, res, ['POST'])) {
+      const body = await readJson(req)
+      const descriptor = descriptorOf(registry, text(body.channelId))
+      if (!descriptor) {
+        sendJson(res, 404, { ok: false, error: 'unknown channel' })
+        return
+      }
+      const loadInfo = registry.loadInfo(descriptor)
+      if (!loadInfo) {
+        sendJson(res, 409, { ok: false, error: 'channel package is not installed' })
+        return
+      }
+      try {
+        await worker.reloadChannel?.(loadInfo)
+      } catch (error) {
+        sendJson(res, 502, { ok: false, error: errorMessage(error) })
+        return
       }
       modelsChanged(descriptor)
       sendJson(res, 200, { ok: true })
