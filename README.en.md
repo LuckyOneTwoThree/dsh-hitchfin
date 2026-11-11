@@ -23,8 +23,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.5.1-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-144%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/version-0.5.2-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-148%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -50,7 +50,7 @@ No need to wait for the market listing or an npm release. Install straight from 
 dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
 ```
 
-To pin a version, use a tag or commit, for example `github:LuckyOneTwoThree/dsh-hitchfin#v0.5.1`. Restart DSH when prompted.
+To pin a version, use a tag or commit, for example `github:LuckyOneTwoThree/dsh-hitchfin#v0.5.2`. Restart DSH when prompted.
 
 > If your npm asks you to approve the package's install script (`prepare`), allow it; it only runs `npm run build`.
 
@@ -68,7 +68,7 @@ dsh plugin --profile web add dsh-hitchfin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.5.1.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.5.2.tgz
 ```
 
 > The DSH Desktop profile is managed by the Electron application. Install through the app's **Plugins** page or the plugin market rather than editing the desktop profile by hand.
@@ -90,8 +90,8 @@ Requirements are listed under [Compatibility](#compatibility).
 - **Cooldown after a failure** — a failed account cools down for a code-specific window instead of being retried against the vendor; when every account is cooling down, DSH gets a clear retry time.
 - **Per-account HTTP(S) proxies** — a proxy is applied to that account's sign-in, model list, usage and chat requests. Other accounts stay direct. Proxy credentials are masked in the UI and are never written to logs.
 - **Free-model filter** — free-only is on by default. Channels without free/paid metadata (currently Trae CN) are shown in full instead of hiding everything.
-- **Model visibility** — search the catalog, hide individual models, or hide paid models in one action. Visibility settings apply to the whole channel.
-- **Native DSH UX** — channel tabs, quota progress bars, account menus, account-level proxy editor, model manager, toasts, dark mode and a layout that holds up on narrow screens.
+- **Model visibility** — search the catalog, hide individual models, select all / clear all (optionally limited to the search results), or hide paid models in one action. Visibility settings apply to the whole channel.
+- **Native DSH UX** — an at-a-glance overview strip, channel tabs, quota progress bars, account menus, account-level proxy editor, model manager, toasts, dark mode and a layout that holds up on narrow screens. The settings page follows one design system, with WCAG AA text contrast in both themes.
 - **One-click browser sign-in** — clicking browser sign-in opens the system browser directly with the official authorization URL. The re-open link in the settings page is a fallback, not a required second click.
 - **Local-first** — credentials live in DSH's credential store on this device. The plugin does not run telemetry or send account data anywhere except the vendor endpoints the channel package is designed to call.
 
@@ -105,7 +105,7 @@ Requirements are listed under [Compatibility](#compatibility).
 
 ![Dark mode](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-dark.png)
 
-**Model visibility** — search within a channel, hide models one by one, or hide every paid model at once.
+**Model visibility** — search within a channel, hide models one by one, select all / clear all (scoped to the matches when a search is active), or hide every paid model at once.
 
 ![Model visibility](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/model-visibility.png)
 
@@ -115,7 +115,7 @@ Requirements are listed under [Compatibility](#compatibility).
 | --- | --- | --- | --- | --- |
 | WorkBuddy CN | Stable | Browser, API Key | Yes | Live model catalog and a real free-model chat request verified |
 | Qoder CN | Stable | Browser, PAT | Yes | Login flow verified; live chat validation is on the roadmap |
-| Trae CN | Experimental | Browser | No — all models are shown | Login flow verified; the 90-entry live catalog yields 62 display models after dropping IDE-internal entries and deduplicating by display name |
+| Trae CN | Stable | Browser | No — all models are shown | Login flow verified; the 90-entry live catalog yields 62 display models after dropping IDE-internal entries and deduplicating by display name |
 
 Channel support is powered by maintained OpenCode-compatible adapter packages. Vendor catalogs, quotas and free-tier rules can change at any time.
 
@@ -220,7 +220,7 @@ See [docs/development-plan.md](docs/development-plan.md) for the design notes an
 - More granular per-account quota refresh diagnostics.
 - Additional channels only when their official login and terms permit this kind of bridge.
 
-Trae CN is intentionally marked experimental. OpenCode Zen is not part of this plugin.
+Trae CN's sign-in flow and live model catalog have been verified; as with Qoder CN, live chat verification is still on the roadmap. OpenCode Zen is not part of this plugin.
 
 ## About
 

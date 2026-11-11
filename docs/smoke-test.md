@@ -10,7 +10,7 @@
 2. 安装本轮 tarball：
 
    ```sh
-   dsh plugin --profile <test-profile> add ./dsh-hitchfin-0.5.1.tgz
+   dsh plugin --profile <test-profile> add ./dsh-hitchfin-0.5.2.tgz
    ```
 
    通过 DSH 插件页面安装时，选择本地 tarball / 本地目录。

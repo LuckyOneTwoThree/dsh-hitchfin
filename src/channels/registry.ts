@@ -129,7 +129,7 @@ export const TRAE: ChannelDescriptor = {
   providerId: 'hitchfin-trae-cn',
   packageProvider: 'trae-cn',
   displayName: 'Trae CN',
-  status: 'experimental',
+  status: 'stable',
   protocols: ['openai-completions'],
   authMethods: [{ id: 'browser', label: '浏览器登录', kind: 'browser', index: 0 }],
   freeOnlyDefault: true,

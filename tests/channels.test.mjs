@@ -25,8 +25,8 @@ test('auth method indexes still match the channel package methods array', () => 
   )
 })
 
-test('Trae keeps its experimental status until a real account is verified', () => {
-  assert.equal(TRAE.status, 'experimental')
+test('Trae is stable now that its login flow and live catalog are verified', () => {
+  assert.equal(TRAE.status, 'stable')
   assert.equal(WORKBUDDY.status, 'stable')
   assert.equal(QODER.status, 'stable')
 })

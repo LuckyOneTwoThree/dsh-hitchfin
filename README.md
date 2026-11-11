@@ -23,8 +23,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.5.1-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-144%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/version-0.5.2-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-148%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -50,7 +50,7 @@ DSH 已经有一整套通用 API Key 供应商能力。`dsh-hitchfin` 覆盖的�
 dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
 ```
 
-如需固定版本，可以指定 tag 或提交，例如 `github:LuckyOneTwoThree/dsh-hitchfin#v0.5.1`。安装后按提示重启 DSH。
+如需固定版本，可以指定 tag 或提交，例如 `github:LuckyOneTwoThree/dsh-hitchfin#v0.5.2`。安装后按提示重启 DSH。
 
 > 如果你的 npm 提示该包的安装脚本（`prepare`）需要批准，请按提示允许；该脚本只执行 `npm run build`。
 
@@ -68,7 +68,7 @@ dsh plugin --profile web add dsh-hitchfin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.5.1.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.5.2.tgz
 ```
 
 > DSH Desktop 的 desktop profile 由 Electron 应用独占管理。请通过应用的 **插件** 页面或插件市场安装，不要手动修改 desktop profile。
@@ -90,8 +90,8 @@ dsh plugin --profile web add ./dsh-hitchfin-0.5.1.tgz
 - **失败即冷却**：失败账号按错误类型进入冷却，不再继续请求厂商；全部账号冷却时，请求会明确返回重试时间。
 - **账号级 HTTP(S) 代理**：代理只作用于该账号的登录、模型列表、额度与聊天请求，其他账号保持直连；代理凭据在界面中掩码，不写入日志。
 - **免费模型过滤**：默认只显示免费模型。没有免费/付费元数据的渠道（目前是 Trae CN）显示全部模型，而不是全部隐藏。
-- **模型可见性**：支持搜索模型、逐个隐藏、一键隐藏全部付费模型；设置对整个渠道生效。
-- **原生 DSH 界面**：频道 Tab、额度进度条、账号菜单、行内代理编辑、模型管理、Toast、暗色模式与窄屏适配。
+- **模型可见性**：支持搜索模型、逐个隐藏、全选 / 全不选（可只作用于搜索结果）、一键隐藏全部付费模型；设置对整个渠道生效。
+- **原生 DSH 界面**：接入概览状态条、频道 Tab、额度进度条、账号菜单、行内代理编辑、模型管理、Toast、暗色模式与窄屏适配；设置页按统一的设计系统排版，明暗主题均满足 WCAG AA 文本对比度。
 - **浏览器登录直达**：点击浏览器登录后直接拉起系统默认浏览器；设置页里的「重新打开」只是兜底，不是必需的第二次点击。
 - **本地优先**：凭据保存在本机 DSH credential store。插件不做遥测，也不会把账号数据发到渠道包指定厂商接口以外的地方。
 
@@ -105,7 +105,7 @@ dsh plugin --profile web add ./dsh-hitchfin-0.5.1.tgz
 
 ![暗色模式](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/overview-dark.png)
 
-**模型可见性**：按渠道搜索模型、逐个隐藏，或一键隐藏全部付费模型。
+**模型可见性**：按渠道搜索模型、逐个隐藏、全选或全不选（有搜索词时只作用于匹配结果），或一键隐藏全部付费模型。
 
 ![模型可见性](https://raw.githubusercontent.com/LuckyOneTwoThree/dsh-hitchfin/main/docs/images/model-visibility.png)
 
@@ -115,7 +115,7 @@ dsh plugin --profile web add ./dsh-hitchfin-0.5.1.tgz
 | --- | --- | --- | --- | --- |
 | WorkBuddy CN | 稳定 | 浏览器、API Key | 有 | 已验证真实模型目录与真实免费模型对话 |
 | Qoder CN | 稳定 | 浏览器、PAT | 有 | 已验证登录链路；真实对话验证在路线图中 |
-| Trae CN | 实验性 | 浏览器 | 无，显示全部模型 | 已验证登录链路；live 目录 90 个内部 ID，过滤 IDE 内部条目并按显示名去重后为 62 个显示模型 |
+| Trae CN | 稳定 | 浏览器 | 无，显示全部模型 | 已验证登录链路；live 目录 90 个内部 ID，过滤 IDE 内部条目并按显示名去重后为 62 个显示模型 |
 
 渠道能力来自持续维护的 OpenCode 兼容适配包。厂商模型目录、额度和免费层规则可能随时变化。
 
@@ -220,7 +220,7 @@ npm run test:contract   # 比对真实渠道包的登录方式数组
 - 更细的按账号额度刷新诊断。
 - 仅在官方登录方式和条款允许时增加新渠道。
 
-Trae CN 仍标记为实验性。OpenCode Zen 不包含在此插件中。
+Trae CN 的登录链路与 live 模型目录已实测；与 Qoder CN 一样，真实对话验证仍在路线图中。OpenCode Zen 不包含在此插件中。
 
 ## 关于
 
