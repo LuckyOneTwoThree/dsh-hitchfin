@@ -23,8 +23,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.5.0-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-131%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/version-0.5.1-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-144%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -42,6 +42,18 @@ It adds WorkBuddy CN, Qoder CN and Trae CN as native DSH model providers. Sign i
 
 Once listed, open **Plugins → Discover**, search for **dsh-hitchfin**, and install it from the card. Restart DSH if the host asks you to.
 
+### Directly from the GitHub repository (web / CLI profiles)
+
+No need to wait for the market listing or an npm release. Install straight from the repo; the plugin is built automatically during install, which needs Node.js ≥ 20.18.1 and git.
+
+```sh
+dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
+```
+
+To pin a version, use a tag or commit, for example `github:LuckyOneTwoThree/dsh-hitchfin#v0.5.1`. Restart DSH when prompted.
+
+> If your npm asks you to approve the package's install script (`prepare`), allow it; it only runs `npm run build`.
+
 ### From npm (after publishing; web / CLI profiles)
 
 Use this once the package is published to npm. Until then, install from the plugin market or use the local build below.
@@ -56,7 +68,7 @@ dsh plugin --profile web add dsh-hitchfin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.5.0.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.5.1.tgz
 ```
 
 > The DSH Desktop profile is managed by the Electron application. Install through the app's **Plugins** page or the plugin market rather than editing the desktop profile by hand.
@@ -103,9 +115,11 @@ Requirements are listed under [Compatibility](#compatibility).
 | --- | --- | --- | --- | --- |
 | WorkBuddy CN | Stable | Browser, API Key | Yes | Live model catalog and a real free-model chat request verified |
 | Qoder CN | Stable | Browser, PAT | Yes | Login flow verified; live chat validation is on the roadmap |
-| Trae CN | Experimental | Browser | No — all models are shown | Login flow verified; live catalog deduplicated from 90 internal IDs to 68 display models |
+| Trae CN | Experimental | Browser | No — all models are shown | Login flow verified; the 90-entry live catalog yields 62 display models after dropping IDE-internal entries and deduplicating by display name |
 
 Channel support is powered by maintained OpenCode-compatible adapter packages. Vendor catalogs, quotas and free-tier rules can change at any time.
+
+When a live catalog read fails, the plugin never publishes the channel package's built-in placeholder models as if they were real: the settings page reports *Catalog failed* and keeps the last successfully read catalog, so the picker does not suddenly empty. Use **Model visibility → Refresh** to force a fresh read. Trae's `-auto` routing twins and `*_subagent` IDE helpers are filtered out of the picker.
 
 ## Multi-account routing
 
@@ -145,6 +159,9 @@ That is session stickiness: a session and model stay on the last account that wo
 
 **Usage says "unavailable".**
 Usage is a separate request with a 5-second timeout. A transient vendor failure shows that line without affecting chat or the model list; it recovers on its own.
+
+**The settings page says "Catalog failed".**
+A live catalog read can fail transiently (network, sign-in state, a vendor hiccup). The plugin keeps the last successful model list and shows the warning instead of falling back to the built-in placeholder table. **Model visibility → Refresh** rebuilds the channel package instance and reads again, bypassing the package's short negative cache. If it still fails, check the account's sign-in state and proxy.
 
 **Why does Trae CN have no free/paid metadata?**
 The channel package does not provide it, so *Free models only* has no effect on Trae and its full catalog is shown.

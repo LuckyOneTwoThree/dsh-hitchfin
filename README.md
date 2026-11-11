@@ -23,8 +23,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.5.0-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-131%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/version-0.5.1-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-144%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -42,6 +42,18 @@ DSH 已经有一整套通用 API Key 供应商能力。`dsh-hitchfin` 覆盖的�
 
 插件收录后，打开 **插件 → 发现**，搜索 **dsh-hitchfin**，从卡片直接安装。宿主提示需要重启时重启 DSH。
 
+### 从 GitHub 仓库直接安装（Web / CLI profile）
+
+不用等收录或发布，直接从仓库拉取即可。安装时会自动构建插件，需要本机有 Node.js ≥ 20.18.1 和 git。
+
+```sh
+dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
+```
+
+如需固定版本，可以指定 tag 或提交，例如 `github:LuckyOneTwoThree/dsh-hitchfin#v0.5.1`。安装后按提示重启 DSH。
+
+> 如果你的 npm 提示该包的安装脚本（`prepare`）需要批准，请按提示允许；该脚本只执行 `npm run build`。
+
 ### 从 npm 安装（发布后；Web / CLI profile）
 
 包发布到 npm 后再使用下面的命令。当前尚未发布时，请用插件市场或下面的本地构建方式。
@@ -56,7 +68,7 @@ dsh plugin --profile web add dsh-hitchfin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.5.0.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.5.1.tgz
 ```
 
 > DSH Desktop 的 desktop profile 由 Electron 应用独占管理。请通过应用的 **插件** 页面或插件市场安装，不要手动修改 desktop profile。
@@ -103,9 +115,11 @@ dsh plugin --profile web add ./dsh-hitchfin-0.5.0.tgz
 | --- | --- | --- | --- | --- |
 | WorkBuddy CN | 稳定 | 浏览器、API Key | 有 | 已验证真实模型目录与真实免费模型对话 |
 | Qoder CN | 稳定 | 浏览器、PAT | 有 | 已验证登录链路；真实对话验证在路线图中 |
-| Trae CN | 实验性 | 浏览器 | 无，显示全部模型 | 已验证登录链路；真实模型目录已从 90 个内部 ID 去重为 68 个显示模型 |
+| Trae CN | 实验性 | 浏览器 | 无，显示全部模型 | 已验证登录链路；live 目录 90 个内部 ID，过滤 IDE 内部条目并按显示名去重后为 62 个显示模型 |
 
 渠道能力来自持续维护的 OpenCode 兼容适配包。厂商模型目录、额度和免费层规则可能随时变化。
+
+实时目录读取失败时，插件不会把渠道包内置的占位模型当真实目录发布：设置页提示「目录读取失败」并保留上次成功读取的目录，模型选择器也不会突然清空。可在「模型可见性 → 刷新模型」强制重新读取。Trae 的 `-auto` 路由别名与 `*_subagent` 等 IDE 内部条目会被过滤，不会出现在模型选择器里。
 
 ## 多账号路由
 
@@ -145,6 +159,9 @@ dsh plugin --profile web add ./dsh-hitchfin-0.5.0.tgz
 
 **额度显示「额度暂不可用」。**
 额度是独立请求（5 秒超时）。厂商接口偶发失败时会显示这句，不影响对话和模型列表，稍后会自行恢复。
+
+**设置页提示「目录读取失败」。**
+渠道包的实时模型目录偶发失败时（网络、登录态、厂商侧抖动），插件会保留上次成功的模型列表并提示，不会退回内置的占位目录。点「模型可见性」里的「刷新模型」会重建渠道包实例并重新读取，绕开渠道包内部的短时负缓存；仍失败时请检查账号登录态与代理后重试。
 
 **Trae CN 为什么没有免费/付费标记。**
 渠道包不提供该元数据，所以「只显示免费模型」对 Trae 不生效，Trae 会显示全部模型。
