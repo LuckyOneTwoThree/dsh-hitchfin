@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  bulkHiddenTokens,
   canonicalHiddenNames,
   dedupeModels,
   isModelHidden,
@@ -317,4 +318,46 @@ test('adapter.listModels no longer resurrects an alias after hiding', async () =
   const models = await adapter.listModels(descriptor.providerId)
   assert.equal(models.some((m) => m.name === NAME), false)
   assert.deepEqual(models.map((m) => m.id), ['glm-5.3'])
+})
+
+// ---------------------------------------------------------------------------
+// Bulk select / clear-all in the model visibility panel
+
+test('bulk hide stores both the canonical name and the id', () => {
+  const models = [
+    { id: 'kimi-k2.6', name: 'Kimi K2.6' },
+    { id: 'glm-5.3', name: 'GLM-5.3' },
+  ]
+  const hidden = bulkHiddenTokens(models, [], 'hide')
+  assert.deepEqual(hidden, ['kimi k2.6', 'kimi-k2.6', 'glm-5.3'])
+  assert.equal(isModelHidden(models[0], new Set(hidden)), true)
+  assert.equal(isModelHidden(models[1], new Set(hidden)), true)
+})
+
+test('bulk show removes names, ids and loose spellings but keeps unknown tokens', () => {
+  const models = [
+    { id: 'kimi-k2.6', name: 'Kimi-K2.6' },
+    { id: 'glm-5.3', name: 'GLM-5.3' },
+  ]
+  const hidden = ['kimi k2.6', 'kimi-k2.6', 'glm-5.3', 'retired-model']
+  assert.deepEqual(bulkHiddenTokens(models, hidden, 'show'), ['retired-model'])
+})
+
+test('bulk actions only touch the given model set (search scope)', () => {
+  const all = [
+    { id: 'glm-5.3', name: 'GLM-5.3' },
+    { id: 'kimi-k2.6', name: 'Kimi K2.6' },
+  ]
+  const previous = ['other-model', 'other-model-id']
+  const hidden = bulkHiddenTokens([all[0]], previous, 'hide')
+  assert.deepEqual(hidden, ['other-model', 'other-model-id', 'glm-5.3'])
+  assert.deepEqual(bulkHiddenTokens([all[0]], hidden, 'show'), previous)
+})
+
+test('bulk hide then show round-trips the visible model list', () => {
+  const raw = [model('a', 'Model A'), model('b', 'Model B')]
+  const hidden = bulkHiddenTokens(raw, [], 'hide')
+  assert.equal(selectVisibleModels(raw, new Set(hidden), false).models.length, 0)
+  const cleared = bulkHiddenTokens(raw, hidden, 'show')
+  assert.equal(selectVisibleModels(raw, new Set(cleared), false).models.length, 2)
 })

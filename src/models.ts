@@ -174,3 +174,37 @@ export function canonicalHiddenNames(
   for (const set of sets.slice(1)) shared = shared.filter((name) => set.has(name))
   return shared.sort()
 }
+
+/** Minimal shape needed to build hidden tokens for a bulk show/hide action. */
+export interface ModelToken {
+  id: string
+  name: string
+}
+
+/**
+ * Show or hide a set of models in one settings write. Hiding stores both the
+ * canonical name and the id, so a vendor rename cannot bring a model back;
+ * showing removes every spelling of those tokens (name, id and loose variants)
+ * while leaving tokens for models outside the set untouched.
+ */
+export function bulkHiddenTokens(
+  models: readonly ModelToken[],
+  hidden: readonly string[],
+  action: 'show' | 'hide',
+): string[] {
+  if (action === 'hide') {
+    return [
+      ...new Set([
+        ...hidden,
+        ...models.flatMap((model) => [normalizedModelName(model.name), model.id]),
+      ]),
+    ]
+  }
+  const ids = new Set(models.map((model) => model.id))
+  const names = new Set(models.map((model) => normalizedModelName(model.name)))
+  const loose = new Set(models.map((model) => looseModelKey(model.name)))
+  return hidden.filter(
+    (token) =>
+      !ids.has(token) && !names.has(token) && !loose.has(looseModelKey(token)),
+  )
+}
