@@ -160,12 +160,23 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
 
   const routeServices = { registry, accounts, worker, adapter }
   const cleanups: Array<() => void> = []
+  const flowCleanups: Array<() => void> = []
+  let disposed = false
+  // A deferred `ctx.inject` callback can arrive after the plugin fiber ends;
+  // registering then would leak a route that nothing unregisters.
+  const registerRoutes = (scope: HitchfinContext): void => {
+    if (disposed) return
+    const cleanup = registerHitchfinRoutes(scope, routeServices)
+    if (disposed) {
+      cleanup()
+      return
+    }
+    cleanups.push(cleanup)
+  }
   if (typeof ctx.inject === 'function') {
-    ctx.inject(['webServer'], (scope) => {
-      cleanups.push(registerHitchfinRoutes(scope, routeServices))
-    })
+    ctx.inject(['webServer'], (scope) => registerRoutes(scope))
   } else if (ctx.webServer) {
-    cleanups.push(registerHitchfinRoutes(ctx, routeServices))
+    registerRoutes(ctx)
   } else {
     ctx.logger.warn('dsh-hitchfin: webServer is unavailable; settings routes are disabled')
   }
@@ -174,6 +185,7 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
   // `ctx.on('dispose', ...)` silently never fires here, which used to leak the
   // worker thread and leave the settings route registered across a reload.
   const disposePlugin = (): void => {
+    disposed = true
     for (const cleanup of cleanups) {
       try {
         cleanup()
@@ -181,6 +193,18 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
         // The host may already be tearing down its services.
       }
     }
+    cleanups.length = 0
+    // Authorization flows are registered on a shared service, so they do not
+    // disappear with the fiber. Without this, reloading the plugin would leave
+    // the old flow keys pointing at the stopped worker.
+    for (const cleanup of flowCleanups) {
+      try {
+        cleanup()
+      } catch {
+        // The authorization service may already be gone.
+      }
+    }
+    flowCleanups.length = 0
     void worker.stop()
   }
   let teardownRegistered = false
@@ -202,7 +226,7 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
       if (!firstMethod) continue
       const accountId = NATIVE_ACCOUNT_ID
       const key = accountKey(descriptor.id, accountId)
-      ctx.authorization.registerFlow({
+      const cleanup = ctx.authorization.registerFlow({
         key,
         label: descriptor.displayName,
         methods: [{ id: firstMethod.id, label: firstMethod.label }],
@@ -275,6 +299,7 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
           }
         },
       })
+      if (typeof cleanup === 'function') flowCleanups.push(cleanup)
     }
   } else {
     ctx.logger.warn('dsh-hitchfin: authorization service is unavailable; sign-in is disabled')

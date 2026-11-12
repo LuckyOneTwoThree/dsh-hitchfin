@@ -127,6 +127,8 @@ const CRASH_THRESHOLD = 3
 const CIRCUIT_MS = 30_000
 /** Long enough for a browser sign-in, short enough to stop a leaked attempt. */
 const AUTH_CALL_TIMEOUT_MS = 15 * 60_000
+/** Matches the worker's own auth-session TTL. */
+const AUTH_SESSION_TTL_MS = 10 * 60_000
 /** A stalled vendor connection must not hold a turn open forever. */
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000
 /**
@@ -170,6 +172,13 @@ export class ChannelWorkerHost {
   private readonly streams = new Map<number, StreamState>()
   /** worker auth session -> pending callback RPC id */
   private readonly authCallIds = new Map<string, number>()
+  /**
+   * Sign-in sessions that are still waiting for their callback. A cancelled
+   * sign-in recycles the worker to release a loopback server, but a new sign-in
+   * started in that window lives only inside the worker; without this it would
+   * be killed by the recycle as well.
+   */
+  private readonly activeAuth = new Map<string, { at: number; generation: number }>()
   private readonly defaultTimeoutMs: number
   private readonly streamIdleTimeoutMs: number
   private readonly expectedExits = new WeakSet<Worker>()
@@ -537,6 +546,10 @@ export class ChannelWorkerHost {
       { channel, accountId, method, inputs, ...(proxy ? { proxy } : {}) },
       60_000,
     )
+    this.activeAuth.set(started.session, {
+      at: Date.now(),
+      generation: this.workerGeneration,
+    })
     return { ...started, session: this.scopeSession(started.session) }
   }
 
@@ -579,6 +592,10 @@ export class ChannelWorkerHost {
       if (callId !== undefined && this.authCallIds.get(workerSession) === callId) {
         this.authCallIds.delete(workerSession)
       }
+      // The worker drops the session as soon as the callback is claimed, so a
+      // deferred recycle is free to run once this call settles.
+      this.activeAuth.delete(workerSession)
+      this.maybeRecycle()
     }
   }
 
@@ -586,6 +603,7 @@ export class ChannelWorkerHost {
     const workerSession = this.rawSession(session)
     // A session from a worker we already recycled has nothing left to cancel.
     if (workerSession === undefined) return
+    this.activeAuth.delete(workerSession)
     // Fail the pending callback now. Waiting for its fifteen-minute RPC
     // timeout is what kept a cancelled sign-in (and Trae's loopback server)
     // alive long after the user gave up.
@@ -610,7 +628,7 @@ export class ChannelWorkerHost {
     // active. If work is still running, remember to recycle as soon as it ends.
     const timer = setTimeout(() => {
       if (this.disposed) return
-      if (this.streams.size === 0 && this.pending.size === 0) {
+      if (this.streams.size === 0 && this.pending.size === 0 && !this.hasLiveAuthSessions()) {
         void this.restart()
       } else {
         this.recycleAfterIdle = true
@@ -619,10 +637,32 @@ export class ChannelWorkerHost {
     timer.unref?.()
   }
 
+  /**
+   * Whether a sign-in is still waiting for its callback. Entries from a
+   * recycled worker or past the worker's own TTL are pruned here.
+   */
+  private hasLiveAuthSessions(now = Date.now()): boolean {
+    for (const [session, entry] of this.activeAuth) {
+      if (
+        entry.generation !== this.workerGeneration ||
+        now - entry.at > AUTH_SESSION_TTL_MS
+      ) {
+        this.activeAuth.delete(session)
+      }
+    }
+    return this.activeAuth.size > 0
+  }
+
   /** Recycle a worker that was waiting for in-flight work when auth was cancelled. */
   private maybeRecycle(): void {
     if (!this.recycleAfterIdle || this.disposed) return
-    if (this.streams.size > 0 || this.pending.size > 0) return
+    if (
+      this.streams.size > 0 ||
+      this.pending.size > 0 ||
+      this.hasLiveAuthSessions()
+    ) {
+      return
+    }
     this.recycleAfterIdle = false
     void this.restart()
   }
@@ -700,6 +740,7 @@ export class ChannelWorkerHost {
     // before its replacement exists.
     this.workerGeneration += 1
     this.authCallIds.clear()
+    this.activeAuth.clear()
     const worker = this.worker
     this.worker = null
     if (worker) {
@@ -799,6 +840,7 @@ export class ChannelWorkerHost {
     this.disposed = true
     this.recycleAfterIdle = false
     this.authCallIds.clear()
+    this.activeAuth.clear()
     const worker = this.worker
     this.worker = null
     const stoppedError = new HitchfinError('channel worker stopped', 'WORKER_STOPPED')

@@ -8,6 +8,7 @@ import {
   isModelHidden,
   resolveHiddenNames,
   selectVisibleModels,
+  unhideModelTokens,
 } from '../lib/models.js'
 import { registerHitchfinRoutes } from '../lib/routes.js'
 import { HitchfinAdapter } from '../lib/adapter/hitchfin-adapter.js'
@@ -379,4 +380,23 @@ test('resolveHiddenNames keeps a token whose loose key is empty', () => {
   const raw = [model('a', '模型甲'), model('b', 'Model B')]
   const names = resolveHiddenNames(raw, new Set(['☆']))
   assert.deepEqual([...names], ['☆'])
+})
+
+test('showing one model never clears other non-ASCII model tokens', () => {
+  const hidden = ['模型甲', 'a', '模型乙', 'b']
+  assert.deepEqual(unhideModelTokens(hidden, { id: 'a', name: '模型甲' }), ['模型乙', 'b'])
+  // A token whose loose key is empty must not match a model with an empty key.
+  assert.deepEqual(unhideModelTokens(['☆', '模型乙', 'b'], { id: 'a', name: '模型甲' }), [
+    '☆',
+    '模型乙',
+    'b',
+  ])
+})
+
+test('showing one model removes its name, id and loose spellings', () => {
+  const hidden = ['DeepSeek-V4.1-Flash', 'deepseek v4.1 flash', 'deepseek-v4.1-flash', 'other']
+  assert.deepEqual(
+    unhideModelTokens(hidden, { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' }),
+    ['other'],
+  )
 })

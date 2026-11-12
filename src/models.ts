@@ -186,6 +186,27 @@ export interface ModelToken {
 }
 
 /**
+ * Remove every stored spelling of one model from a hidden-token list.
+ *
+ * A fully non-ASCII model name has an empty loose key. Matching on that would
+ * make every such name identical, so the loose comparison only applies when
+ * the key is non-empty — the same guard `bulkHiddenTokens` uses.
+ */
+export function unhideModelTokens(
+  hidden: readonly string[],
+  model: ModelToken,
+): string[] {
+  const key = normalizedModelName(model.name)
+  const loose = looseModelKey(key)
+  return hidden.filter(
+    (token) =>
+      token !== key &&
+      token !== model.id &&
+      !(loose.length > 0 && looseModelKey(token) === loose),
+  )
+}
+
+/**
  * Show or hide a set of models in one settings write. Hiding stores both the
  * canonical name and the id, so a vendor rename cannot bring a model back;
  * showing removes every spelling of those tokens (name, id and loose variants)

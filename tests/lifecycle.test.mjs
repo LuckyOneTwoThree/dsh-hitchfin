@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url'
 const crashWorker = new URL('./fixtures/crash-worker.mjs', import.meta.url)
 const auditWorker = new URL('./fixtures/audit-worker.mjs', import.meta.url)
 const authWorker = new URL('./fixtures/auth-worker.mjs', import.meta.url)
+const slowAuthWorker = new URL('./fixtures/slow-auth-worker.mjs', import.meta.url)
 const stallWorker = new URL('./fixtures/stall-worker.mjs', import.meta.url)
 const channel = {
   channelId: 'workbuddy-cn',
@@ -240,6 +241,76 @@ test('legacy hosts without effect still receive the on(dispose) fallback', async
   assert.equal(typeof dispose, 'function')
   assert.doesNotThrow(() => dispose())
   assert.equal(unregistered.value, true)
+})
+
+test('plugin teardown disposes the native authorization flows', () => {
+  const disposed = []
+  let registered = 0
+  let teardown
+  const ctx = pluginContext({
+    unregistered: { value: false },
+    effect(setup) {
+      teardown = setup()
+      return () => {}
+    },
+  })
+  ctx.authorization = {
+    registerFlow() {
+      const index = registered
+      registered += 1
+      return () => disposed.push(index)
+    },
+  }
+  apply(ctx)
+  assert.equal(registered, 3)
+  assert.doesNotThrow(() => teardown())
+  assert.deepEqual(disposed, [0, 1, 2])
+})
+
+test('a webServer injection arriving after teardown does not register routes', () => {
+  const unregistered = { value: false }
+  let deferred
+  let teardown
+  const ctx = pluginContext({
+    unregistered,
+    effect(setup) {
+      teardown = setup()
+      return () => {}
+    },
+  })
+  ctx.inject = (_deps, callback) => {
+    deferred = callback
+  }
+  apply(ctx)
+  assert.equal(typeof deferred, 'function')
+  teardown()
+  deferred(ctx)
+  assert.equal(unregistered.value, false)
+})
+
+test('a cancelled sign-in does not recycle the worker out from under a new one', async () => {
+  const host = new ChannelWorkerHost({ workerPath: slowAuthWorker })
+  try {
+    const first = await host.authorize(channel, 'acct-1', 0)
+    const stuck = host.callback(channel, first.session)
+    host.cancelAuth(first.session)
+    await assert.rejects(
+      () => stuck,
+      (error) => {
+        assert.equal(error.code, 'ABORTED')
+        return true
+      },
+    )
+
+    const second = await host.authorize(channel, 'acct-2', 0)
+    // Past the post-cancel recycle window. The old behaviour recycled the
+    // worker here, which silently killed the sign-in started just after it.
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    const result = await host.callback(channel, second.session)
+    assert.equal(result.auth.access, 'slow-access')
+  } finally {
+    await host.stop()
+  }
 })
 
 test('a stopped host rejects fetch calls without leaking a pending stream', async () => {

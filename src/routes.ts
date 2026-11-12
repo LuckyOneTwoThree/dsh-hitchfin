@@ -105,9 +105,16 @@ function isLoopbackHostname(hostname: string): boolean {
 }
 
 function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerResponse): boolean {
-  const connection = ctx.get?.('connection') as
+  let connection:
     | { requestRejection?: (req: IncomingMessage) => unknown }
     | undefined
+  try {
+    connection = ctx.get?.('connection') as typeof connection
+  } catch {
+    // A host service that is unavailable must not turn every settings request
+    // into a 500; the loopback/Host/Origin checks below still apply.
+    connection = undefined
+  }
   // Only a host that actually exposes requestRejection owns the Host-header
   // fence. A `connection` service without that hook does not: treating its mere
   // presence as proof of a fence used to let a rebinding domain straight

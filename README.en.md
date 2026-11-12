@@ -23,8 +23,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
-  <img src="https://img.shields.io/badge/version-0.5.2-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-171%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/version-0.5.3-2F6B5F?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/tests-177%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -52,7 +52,7 @@ The built-in plugin market in DSH Desktop does not list this plugin yet, so inst
 dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
 ```
 
-To pin a version, use a tag or commit, for example `github:LuckyOneTwoThree/dsh-hitchfin#v0.5.2`. Restart DSH when prompted.
+To pin a version, use a tag or commit, for example `github:LuckyOneTwoThree/dsh-hitchfin#v0.5.3`. Restart DSH when prompted.
 
 > If your npm asks you to approve the package's install script (`prepare`), allow it; it only runs `npm run build`.
 
@@ -66,7 +66,7 @@ Once the plugin is listed and your DSH market catalog has updated, open **Plugin
 npm install
 npm run build
 npm pack
-dsh plugin --profile web add ./dsh-hitchfin-0.5.2.tgz
+dsh plugin --profile web add ./dsh-hitchfin-0.5.3.tgz
 ```
 
 > The DSH Desktop profile is managed by the Electron application. Install through the app's **Plugins** page or the plugin market rather than editing the desktop profile by hand.

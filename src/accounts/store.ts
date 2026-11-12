@@ -186,18 +186,29 @@ export class AccountStore {
     return `acct-${Date.now()}`
   }
 
+  /**
+   * The accounts a channel-wide setting write should touch. Reads (/state)
+   * derive the setting from enabled accounts, but fall back to every account
+   * when none is enabled; the write must use the same set or the toggle would
+   * silently update nothing while the UI keeps showing the old value.
+   */
+  private async channelSettingTargets(channelId: string): Promise<readonly AccountPayload[]> {
+    const accounts = await this.list(channelId)
+    const enabled = accounts.filter((account) => account.enabled !== false)
+    return enabled.length > 0 ? enabled : accounts
+  }
+
   async setChannelFreeOnly(channelId: string, freeOnly: boolean): Promise<void> {
-    // Reads (/state) derive channel settings from enabled accounts only, so a
-    // channel-wide write must not silently rewrite a disabled account's own
-    // copy either.
-    const accounts = (await this.list(channelId)).filter((account) => account.enabled !== false)
+    // A disabled account keeps its own copy for whenever it is re-enabled, and
+    // must not decide the toggle for the enabled ones.
+    const accounts = await this.channelSettingTargets(channelId)
     for (const account of accounts) {
       await this.setFreeOnly(channelId, account.accountId, freeOnly)
     }
   }
 
   async setChannelHiddenModels(channelId: string, hidden: readonly string[]): Promise<void> {
-    const accounts = (await this.list(channelId)).filter((account) => account.enabled !== false)
+    const accounts = await this.channelSettingTargets(channelId)
     for (const account of accounts) {
       await this.setHiddenModels(channelId, account.accountId, hidden)
     }

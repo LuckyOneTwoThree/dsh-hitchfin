@@ -3,8 +3,8 @@ import { QODER_LOGO, TRAE_LOGO, WORKBUDDY_LOGO } from './logos.js'
 import {
   bulkHiddenTokens,
   isModelHidden,
-  looseModelKey,
   normalizedModelName,
+  unhideModelTokens,
 } from '../models.js'
 import { quotaPercent, quotaValue, type QuotaWindowLike } from '../format.js'
 import { CSS } from './styles.js'
@@ -943,13 +943,7 @@ export function HitchfinSettings() {
     // Drop the canonical name, its loose spellings and any legacy id so a
     // toggle always flips. Store both name and id: a vendor rename must not
     // bring a hidden model back when the live catalog replaces the fallback.
-    const loose = looseModelKey(key)
-    const cleaned = previous.filter(
-      (token) =>
-        token !== key &&
-        token !== model.id &&
-        looseModelKey(token) !== loose,
-    )
+    const cleaned = unhideModelTokens(previous, model)
     void persistHidden(
       target,
       wasHidden ? cleaned : [...new Set([...cleaned, key, model.id])],

@@ -165,3 +165,19 @@ test('channel-wide settings leave disabled accounts untouched', async () => {
   assert.equal((await store.get('workbuddy-cn', 'acct-2')).freeOnly, false)
   assert.equal((await store.get('workbuddy-cn', 'acct-2')).hiddenModels, undefined)
 })
+
+test('channel-wide settings still apply when every account is disabled', async () => {
+  const store = new AccountStore(fakeCredentials())
+  await store.save(account('acct-1', { enabled: false, freeOnly: false }))
+  await store.save(account('acct-2', { enabled: false, freeOnly: false }))
+
+  // /state derives the toggle from all accounts when none is enabled, so the
+  // write has to target all of them as well.
+  await store.setChannelFreeOnly('workbuddy-cn', true)
+  await store.setChannelHiddenModels('workbuddy-cn', ['paid-model'])
+
+  const accounts = await store.list('workbuddy-cn')
+  assert.equal(accounts.every((entry) => entry.freeOnly === true), true)
+  assert.equal(accounts.every((entry) => entry.hiddenModels?.includes('paid-model')), true)
+  assert.equal(accounts.every((entry) => entry.enabled === false), true)
+})
