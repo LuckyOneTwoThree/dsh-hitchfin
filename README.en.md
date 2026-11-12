@@ -24,7 +24,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
   <img src="https://img.shields.io/badge/version-0.5.2-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-148%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-171%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -38,13 +38,15 @@ It adds WorkBuddy CN, Qoder CN and Trae CN as native DSH model providers. Sign i
 
 ## Installation
 
-### From the DSH plugin market
+### From npm (web / CLI profiles, recommended)
 
-Once listed, open **Plugins → Discover**, search for **dsh-hitchfin**, and install it from the card. Restart DSH if the host asks you to.
+```sh
+dsh plugin --profile web add dsh-hitchfin
+```
 
 ### Directly from the GitHub repository (web / CLI profiles)
 
-No need to wait for the market listing. Install straight from the repo; the plugin is built automatically during install, which needs Node.js ≥ 20.18.1 and git.
+The built-in plugin market in DSH Desktop does not list this plugin yet, so installing from the repo is the most direct route. The plugin is built automatically during install, which needs Node.js ≥ 20.18.1 and git.
 
 ```sh
 dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
@@ -54,11 +56,9 @@ To pin a version, use a tag or commit, for example `github:LuckyOneTwoThree/dsh-
 
 > If your npm asks you to approve the package's install script (`prepare`), allow it; it only runs `npm run build`.
 
-### From npm (web / CLI profiles)
+### From the DSH plugin market
 
-```sh
-dsh plugin --profile web add dsh-hitchfin
-```
+Once the plugin is listed and your DSH market catalog has updated, open **Plugins → Discover**, search for **dsh-hitchfin**, and install it from the card. **The built-in market may not find it yet**, so use npm or GitHub above for now.
 
 ### From a local build
 
@@ -75,7 +75,7 @@ Requirements are listed under [Compatibility](#compatibility).
 
 ## Quick start
 
-1. Open **Settings → 订阅接入** and pick a channel.
+1. Open **Settings → Subscription bridge** and pick a channel.
 2. Choose a sign-in method. Browser sign-in opens your default browser automatically; use API Key / PAT where the channel offers it.
 3. Keep **Free models only** enabled unless you explicitly want paid models.
 4. The channel's models appear in the DSH model picker. Add a second account or reorder the failover list at any time.

@@ -1,3 +1,4 @@
+import './_fresh.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHitchfinRoutes } from '../lib/routes.js'
@@ -63,8 +64,8 @@ function harness(existingAccounts = [], routeOptions = {}) {
     },
     logger: { info() {}, warn() {} },
     emit() {},
-    get() {
-      return undefined
+    get(name) {
+      return name === 'connection' ? routeOptions.connection : undefined
     },
   }
   const services = {
@@ -352,6 +353,39 @@ test('the fallback fence rejects a non-loopback Host header', async () => {
   }
 })
 
+test('a connection service without requestRejection still gets the Host fence', async () => {
+  const { handler, cleanup } = harness([], { connection: {} })
+  try {
+    const req = makeReq('GET', `${PREFIX}/state`)
+    req.headers.host = 'evil.example'
+    const res = makeRes()
+    handler(req, res)
+    for (let i = 0; i < 50 && !res.body; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.equal(res.statusCode, 403)
+    assert.match(res.body, /host refused/)
+  } finally {
+    cleanup()
+  }
+})
+
+test('a host-owned requestRejection fence still refuses a request', async () => {
+  const { handler, cleanup } = harness([], {
+    connection: { requestRejection: () => 403 },
+  })
+  try {
+    const res = makeRes()
+    handler(makeReq('GET', `${PREFIX}/state`), res)
+    for (let i = 0; i < 50 && !res.body; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.equal(res.statusCode, 403)
+  } finally {
+    cleanup()
+  }
+})
+
 test('malformed Origin header is rejected by fenceRefused', async () => {
   const { handler, cleanup } = harness()
   try {
@@ -395,6 +429,21 @@ test('a settings write for an unknown account returns 404', async () => {
       enabled: false,
     })
     assert.equal(result.status, 404)
+  } finally {
+    cleanup()
+  }
+})
+
+test('hiding models for an unknown account returns 404 instead of a silent no-op', async () => {
+  const { handler, cleanup } = harness([])
+  try {
+    const result = await invoke(handler, 'POST', `${PREFIX}/models/hidden`, {
+      channelId: 'workbuddy-cn',
+      accountId: 'ghost',
+      hiddenModels: ['some-model'],
+    })
+    assert.equal(result.status, 404)
+    assert.match(result.json.error, /unknown account/)
   } finally {
     cleanup()
   }

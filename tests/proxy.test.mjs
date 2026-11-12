@@ -1,3 +1,4 @@
+import './_fresh.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
@@ -88,6 +89,84 @@ test('worker sends chat through the account proxy', async () => {
     assert.equal(requests.length, 1)
     assert.equal(requests[0].url, 'http://upstream.invalid/v1/chat/completions')
     assert.equal(requests[0].method, 'POST')
+  } finally {
+    await host.stop()
+    proxy.closeAllConnections?.()
+    await new Promise((resolve) => proxy.close(resolve))
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('the proxy still applies when a channel package supplies its own fetch', async () => {
+  const requests = []
+  const proxy = createServer((req, res) => {
+    requests.push({ url: req.url, method: req.method })
+    res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+    res.end('data: {"choices":[{"index":0,"delta":{"content":"via custom fetch"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+  })
+  proxy.on('connect', (req, clientSocket) => {
+    clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+    clientSocket.once('data', (chunk) => {
+      const path = chunk.toString('utf8').split('\r\n')[0].split(' ')[1]
+      requests.push({ url: `http://upstream.invalid${path}`, method: 'POST' })
+      const sse = 'data: {"choices":[{"index":0,"delta":{"content":"via custom fetch"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+      clientSocket.write(
+        `HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: ${Buffer.byteLength(sse)}\r\nConnection: close\r\n\r\n${sse}`,
+      )
+      clientSocket.end()
+    })
+  })
+  const port = await listen(proxy)
+
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-hitchfin-custom-fetch-'))
+  const packagePath = join(directory, 'custom-fetch-channel.mjs')
+  writeFileSync(
+    packagePath,
+    `export const CustomFetchPlugin = async () => ({
+  auth: {
+    provider: 'mock',
+    methods: [],
+    async loader() {
+      return {
+        baseURL: 'http://upstream.invalid/v1',
+        // Real channel packages sign the request in their own fetch and then
+        // re-enter the global fetch. The account proxy depends on that hop.
+        async fetch(input, init) { return fetch(input, init) },
+      }
+    },
+  },
+  async 'chat.headers'() {},
+})
+`,
+  )
+
+  const host = new ChannelWorkerHost()
+  try {
+    const response = await host.fetch(
+      'http://hitchfin.local/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'mock', messages: [], stream: true }),
+      },
+      {
+        channel: {
+          channelId: 'mock',
+          packagePath,
+          exportName: 'CustomFetchPlugin',
+          provider: 'mock',
+        },
+        accountId: 'acct-1',
+        auth: { type: 'oauth', access: 'token' },
+        model: 'mock',
+        proxy: `http://127.0.0.1:${port}`,
+      },
+    )
+    const body = await response.text()
+    assert.equal(response.status, 200)
+    assert.match(body, /via custom fetch/)
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].url, 'http://upstream.invalid/v1/chat/completions')
   } finally {
     await host.stop()
     proxy.closeAllConnections?.()

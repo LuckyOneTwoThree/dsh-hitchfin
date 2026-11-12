@@ -1,9 +1,14 @@
+import './_fresh.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ChannelWorkerHost } from '../lib/host/worker-host.js'
 import { registerHitchfinRoutes } from '../lib/routes.js'
 import { apply } from '../lib/index.js'
 import { redactError, resolvePackageEntry } from '../worker/channel-contract.mjs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { pathToFileURL } from 'node:url'
 
 const crashWorker = new URL('./fixtures/crash-worker.mjs', import.meta.url)
 const auditWorker = new URL('./fixtures/audit-worker.mjs', import.meta.url)
@@ -298,6 +303,32 @@ test('a channel that never sends headers times out the fetch itself', async () =
     )
   } finally {
     await host.stop()
+  }
+})
+
+test('a worker that crashed is rebuilt lazily and serves the next call', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-hitchfin-recover-'))
+  const workerPath = join(directory, 'worker.mjs')
+  // A crash must not leave the host permanently dead: the next operation
+  // creates a fresh thread, so a one-off package failure is recoverable.
+  writeFileSync(workerPath, 'process.exit(1)\n')
+  const host = new ChannelWorkerHost({ workerPath: pathToFileURL(workerPath) })
+  try {
+    await assert.rejects(host.describe(channel), /exited with code 1/)
+    writeFileSync(
+      workerPath,
+      `import { parentPort } from 'node:worker_threads'
+parentPort.on('message', (message) => {
+  parentPort.postMessage({ id: message.id, ok: true, result: { provider: 'recovered', methods: [], hooks: ['auth'] } })
+})
+`,
+    )
+    const described = await host.describe(channel)
+    assert.equal(described.provider, 'recovered')
+    assert.deepEqual(described.hooks, ['auth'])
+  } finally {
+    await host.stop()
+    rmSync(directory, { recursive: true, force: true })
   }
 })
 

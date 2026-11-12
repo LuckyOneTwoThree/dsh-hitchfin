@@ -6,6 +6,8 @@ import {
   channelUrl,
   redactError,
   resolvePackageEntry,
+  isLiveCatalog,
+  markFallbackCatalog,
 } from './channel-contract.mjs'
 
 const scope = new AsyncLocalStorage()
@@ -288,7 +290,7 @@ async function handleModels(message) {
   const loaded = await loadChannel(message.channel)
   const dispatcher = await dispatcherFor(message.proxy)
   const freeOnly = Boolean(message.freeOnly)
-  const base = await scope.run(
+  const base = markFallbackCatalog(await scope.run(
     {
       channelId: message.channel.channelId,
       accountId: message.accountId,
@@ -296,7 +298,7 @@ async function handleModels(message) {
       ...(dispatcher ? { dispatcher } : {}),
     },
     () => staticModels(loaded),
-  )
+  ))
   let models = base
   let liveFailed = false
   let liveError
@@ -314,11 +316,11 @@ async function handleModels(message) {
         },
         () => loaded.hooks.provider.models({ id: loaded.provider, models: base }, { auth }),
       )
-      // Every channel package returns the very object we handed in when its
-      // live read fails (`return provider.models`), while a successful read
-      // builds a fresh map. Publishing that placeholder as the account's real
-      // catalog showed a handful of stale models with no error anywhere.
-      if (live && typeof live === 'object' && !Array.isArray(live) && live !== base) {
+      // The package's live read either builds a fresh catalog or returns the
+      // static table we handed in (possibly tagged or shallow-copied). Only a
+      // genuinely fresh, non-empty catalog may be published as the account's
+      // real models; everything else is an explicit failed live read.
+      if (isLiveCatalog(base, live)) {
         models = live
       } else {
         liveFailed = true

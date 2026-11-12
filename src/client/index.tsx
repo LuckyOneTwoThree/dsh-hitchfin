@@ -181,6 +181,17 @@ function methodLabel(method: Method): string {
   return T('浏览器登录', 'Browser')
 }
 
+/** Only real http(s) links may reach an anchor; a channel package's output is not a URL policy. */
+function safeExternalUrl(value?: string): string | undefined {
+  if (!value) return undefined
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.toString() : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function loginPrompt(channel: Channel, login: Login): string {
   if (login.status === 'code') {
     return T('在浏览器完成授权后，粘贴页面显示的授权码。', 'After authorizing in the browser, paste the code shown on that page.')
@@ -479,6 +490,20 @@ export function HitchfinSettings() {
   const [toast, setToast] = useState<Toast | null>(null)
   const [dark, setDark] = useState(detectDark)
   const toastTimer = useRef<number | null>(null)
+  // The newest /state response wins, and every deferred refresh is cancelled
+  // on unmount. A slow quota=0 response used to overwrite a newer snapshot
+  // (or an optimistic toggle), while stray timers kept setting state.
+  const requestSeq = useRef(0)
+  const timers = useRef<Set<number>>(new Set())
+
+  const schedule = (fn: () => void, ms: number): number => {
+    const id = window.setTimeout(() => {
+      timers.current.delete(id)
+      fn()
+    }, ms)
+    timers.current.add(id)
+    return id
+  }
 
   const showToast = (tone: Toast['tone'], message: string) => {
     if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
@@ -487,7 +512,7 @@ export function HitchfinSettings() {
   }
 
   const reveal = (selector: string) => {
-    window.setTimeout(() => {
+    schedule(() => {
       document.querySelector(selector)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     }, 60)
   }
@@ -495,6 +520,8 @@ export function HitchfinSettings() {
   useEffect(() => {
     return () => {
       if (toastTimer.current !== null) window.clearTimeout(toastTimer.current)
+      for (const id of timers.current) window.clearTimeout(id)
+      timers.current.clear()
     }
   }, [])
 
@@ -529,10 +556,13 @@ export function HitchfinSettings() {
   }, [])
 
   const refresh = async (withQuota = true) => {
+    const seq = (requestSeq.current += 1)
     try {
       const body = await json<{ channels: Channel[] }>(
         `/dsh-hitchfin/state${withQuota ? '' : '?quota=0'}`,
       )
+      if (seq !== requestSeq.current) return
+      setError('')
       setChannels((previous) =>
         body.channels.map((channel) => {
           if (withQuota) return channel
@@ -552,15 +582,16 @@ export function HitchfinSettings() {
         }),
       )
     } catch (err) {
+      if (seq !== requestSeq.current) return
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      if (withQuota) setQuotaReady(true)
+      if (seq === requestSeq.current && withQuota) setQuotaReady(true)
     }
   }
 
   useEffect(() => {
     void refresh(false)
-    const timer = window.setTimeout(() => {
+    const timer = schedule(() => {
       void refresh(true)
     }, 350)
     return () => window.clearTimeout(timer)
@@ -585,14 +616,15 @@ export function HitchfinSettings() {
         if (stopped) return
         setLogin(body.login)
         if (body.login.status === 'ok') {
+          setError('')
           setCode('')
           setCompose(null)
           setSecretValue('')
           setSecretError('')
           showToast('success', T('账号已连接', 'Account connected'))
           void refresh(false)
-          window.setTimeout(() => {
-            void refresh(true)
+          schedule(() => {
+            if (!stopped) void refresh(true)
           }, 350)
         }
       } catch (err) {
@@ -648,6 +680,7 @@ export function HitchfinSettings() {
       }
     : null
   const channelLogin = login && channel && login.channelId === channel.id ? login : null
+  const loginUrl = safeExternalUrl(channelLogin?.url)
   const loginPending = Boolean(
     channelLogin && (channelLogin.status === 'pending' || channelLogin.status === 'code'),
   )
@@ -789,7 +822,7 @@ export function HitchfinSettings() {
         setSecretValue('')
         showToast('success', T('账号已连接', 'Account connected'))
         await refresh(false)
-        window.setTimeout(() => {
+        schedule(() => {
           void refresh(true)
         }, 350)
       }
@@ -1130,7 +1163,7 @@ export function HitchfinSettings() {
       setModelQuery('')
       showToast('success', T('账号已删除', 'Account removed'))
       await refresh(false)
-      window.setTimeout(() => {
+      schedule(() => {
         void refresh(true)
       }, 350)
     } catch (err) {
@@ -1413,10 +1446,10 @@ export function HitchfinSettings() {
                 </div>
               ) : (
                 <div className="hf-banner-actions">
-                  {channelLogin.url ? (
+                  {loginUrl ? (
                     <a
                       className={`hf-btn ${channelLogin.autoOpened ? 'ghost small' : 'primary small'}`}
-                      href={channelLogin.url}
+                      href={loginUrl}
                       target="_blank"
                       rel="noreferrer"
                     >
@@ -1566,7 +1599,7 @@ export function HitchfinSettings() {
                       <a href="https://qoder.cn/account/integrations" target="_blank" rel="noreferrer">
                         qoder.cn/account/integrations
                       </a>
-                      {T(' 创建 PAT。', '')}
+                      {T(' 创建 PAT。', '.')}
                     </>
                   )}
             </p>

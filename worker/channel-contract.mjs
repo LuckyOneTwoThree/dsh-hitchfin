@@ -157,3 +157,46 @@ export function resolvePackageEntry(channelId, packagePath) {
   }
   return real
 }
+
+// ---------------------------------------------------------------------------
+// Live catalog contract
+//
+// Every supported channel package receives `{ models: <static fallback> }` in
+// its `provider.models` hook and returns that very object when its live vendor
+// read fails. A bare `live !== base` check made that accidental implementation
+// detail the only thing standing between a failed read and a published
+// placeholder catalog. The worker now marks the fallback explicitly and uses
+// the shared classifier below; the contract probe asserts the package side.
+// ---------------------------------------------------------------------------
+
+const FALLBACK_MARK = Symbol('hitchfin.fallbackCatalog')
+
+/** Tag the static catalog handed to `provider.models` so it stays recognizable. */
+export function markFallbackCatalog(models) {
+  if (!models || typeof models !== 'object' || Array.isArray(models)) return models
+  try {
+    Object.defineProperty(models, FALLBACK_MARK, { value: true })
+  } catch {
+    // A frozen catalog cannot be marked; identity/copy checks still apply.
+  }
+  return models
+}
+
+/** A spread clone of the fallback keeps the same entry references. */
+function isFallbackCopy(base, live) {
+  const baseKeys = Object.keys(base ?? {})
+  if (baseKeys.length !== Object.keys(live).length) return false
+  return baseKeys.every((key) => live[key] === base[key])
+}
+
+/**
+ * True only when `live` is a fresh, non-empty catalog from the vendor rather
+ * than the static table (by identity, by marker, or as a shallow copy).
+ */
+export function isLiveCatalog(base, live) {
+  if (!live || typeof live !== 'object' || Array.isArray(live)) return false
+  if (live === base || Object.prototype.hasOwnProperty.call(live, FALLBACK_MARK)) return false
+  if (Object.keys(live).length === 0) return false
+  if (isFallbackCopy(base, live)) return false
+  return true
+}

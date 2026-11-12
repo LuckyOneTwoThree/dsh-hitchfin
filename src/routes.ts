@@ -49,6 +49,27 @@ interface LoginState {
   createdAt: number
 }
 
+interface StateProbe {
+  raw: readonly ChannelModelRecord[]
+  error?: string
+  liveFailed: boolean
+}
+
+interface ListingCacheEntry {
+  at: number
+  signature: string
+  probes: Map<string, StateProbe>
+}
+
+interface QuotaCacheEntry {
+  at: number
+  signature: string
+  value: Record<string, unknown> | null
+}
+
+/** Settings reads share one short-lived vendor snapshot per channel. */
+const STATE_TTL_MS = 30_000
+
 export interface HitchfinRouteServices {
   registry: ChannelRegistry
   accounts: AccountStore
@@ -87,6 +108,11 @@ function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerRes
   const connection = ctx.get?.('connection') as
     | { requestRejection?: (req: IncomingMessage) => unknown }
     | undefined
+  // Only a host that actually exposes requestRejection owns the Host-header
+  // fence. A `connection` service without that hook does not: treating its mere
+  // presence as proof of a fence used to let a rebinding domain straight
+  // through to every settings route.
+  const hasHostFence = typeof connection?.requestRejection === 'function'
   const rejection = connection?.requestRejection?.(req)
   if (typeof rejection === 'number') {
     sendJson(res, rejection, { ok: false, error: 'request refused' })
@@ -104,7 +130,7 @@ function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerRes
   // Without the host's Connection fence, validate Host as well: a browser
   // tricked into resolving an attacker domain to loopback must not reach a
   // route that trusts "remoteAddress is loopback" alone.
-  if (!connection && typeof req.headers.host === 'string' && req.headers.host.length > 0) {
+  if (!hasHostFence && typeof req.headers.host === 'string' && req.headers.host.length > 0) {
     try {
       const hostname = new URL(`http://${req.headers.host}`).hostname
       if (!isLoopbackHostname(hostname)) {
@@ -326,7 +352,145 @@ export function registerHitchfinRoutes(
     loginTimers.add(timer)
   }
 
+  // A settings refresh used to issue a live catalog read and a usage read for
+  // every account, twice per user action (quota=0 then quota=1), with no cache.
+  // Share one short-lived snapshot per channel and single-flight concurrent
+  // reads; account settings are still applied fresh on every response.
+  const listingCache = new Map<string, ListingCacheEntry>()
+  const listingInflight = new Map<string, Promise<Map<string, StateProbe>>>()
+  const quotaCache = new Map<string, QuotaCacheEntry>()
+  const quotaInflight = new Map<string, Promise<Record<string, unknown> | null>>()
+
+  /** Anything that changes what the vendor would answer invalidates a probe. */
+  const stateSignature = (accountList: readonly AccountPayload[]): string =>
+    accountList
+      .map((account) =>
+        [
+          account.accountId,
+          account.updatedAt,
+          account.enabled !== false ? 1 : 0,
+          account.proxy ?? '',
+        ].join(':'),
+      )
+      .join('|')
+
+  const probeOptions = (
+    loadInfo: NonNullable<ReturnType<ChannelRegistry['loadInfo']>>,
+    account: AccountPayload,
+  ) => ({
+    channel: loadInfo,
+    accountId: account.accountId,
+    auth: account.auth,
+    ...(account.proxy ? { proxy: account.proxy } : {}),
+  })
+
+  async function cachedListings(
+    descriptor: ChannelDescriptor,
+    accountList: readonly AccountPayload[],
+    loadInfo: ReturnType<ChannelRegistry['loadInfo']>,
+  ): Promise<Map<string, StateProbe>> {
+    const key = descriptor.id
+    const signature = stateSignature(accountList)
+    const cached = listingCache.get(key)
+    if (cached && cached.signature === signature && Date.now() - cached.at < STATE_TTL_MS) {
+      return cached.probes
+    }
+    const inflight = listingInflight.get(key)
+    if (inflight) return inflight
+
+    const task = (async () => {
+      const probes = new Map<string, StateProbe>()
+      if (loadInfo) {
+        await Promise.all(
+          accountList
+            .filter((account) => account.enabled !== false)
+            .map(async (account) => {
+              let raw: readonly ChannelModelRecord[] = []
+              let error: string | undefined
+              let liveFailed = false
+              try {
+                const listing = await readModelListing(
+                  worker,
+                  { ...probeOptions(loadInfo, account), freeOnly: false },
+                  8_000,
+                )
+                // Never let a placeholder table through, even if an older
+                // worker still returns one alongside the failure flag.
+                raw = listing.liveFailed ? [] : listing.models
+                if (listing.liveFailed) {
+                  liveFailed = true
+                  error = listing.error ?? 'live model catalog unavailable'
+                }
+              } catch (cause) {
+                liveFailed = true
+                error = errorMessage(cause)
+              }
+              probes.set(account.accountId, { raw, error, liveFailed })
+            }),
+        )
+      }
+      listingCache.set(key, { at: Date.now(), signature, probes })
+      return probes
+    })()
+    listingInflight.set(key, task)
+    try {
+      return await task
+    } finally {
+      if (listingInflight.get(key) === task) listingInflight.delete(key)
+    }
+  }
+
+  async function cachedQuotas(
+    descriptor: ChannelDescriptor,
+    accountList: readonly AccountPayload[],
+    loadInfo: ReturnType<ChannelRegistry['loadInfo']>,
+  ): Promise<Map<string, Record<string, unknown> | null>> {
+    const out = new Map<string, Record<string, unknown> | null>()
+    if (!loadInfo) return out
+    const signature = stateSignature(accountList)
+    await Promise.all(
+      accountList
+        .filter((account) => account.enabled !== false)
+        .map(async (account) => {
+          const key = `${descriptor.id}\0${account.accountId}`
+          const cached = quotaCache.get(key)
+          if (cached && cached.signature === signature && Date.now() - cached.at < STATE_TTL_MS) {
+            out.set(account.accountId, cached.value)
+            return
+          }
+          const inflight = quotaInflight.get(key)
+          if (inflight) {
+            out.set(account.accountId, await inflight)
+            return
+          }
+          const task = (async () => {
+            let value: Record<string, unknown> | null = null
+            try {
+              value = (await worker.usage(probeOptions(loadInfo, account), 5_000)) as unknown as
+                | Record<string, unknown>
+                | null
+            } catch {
+              value = null
+            }
+            quotaCache.set(key, { at: Date.now(), signature, value })
+            return value
+          })()
+          quotaInflight.set(key, task)
+          try {
+            out.set(account.accountId, await task)
+          } finally {
+            if (quotaInflight.get(key) === task) quotaInflight.delete(key)
+          }
+        }),
+    )
+    return out
+  }
+
   const modelsChanged = (descriptor: ChannelDescriptor): void => {
+    listingCache.delete(descriptor.id)
+    for (const key of quotaCache.keys()) {
+      if (key.startsWith(`${descriptor.id}\0`)) quotaCache.delete(key)
+    }
     adapter.invalidate(descriptor.providerId)
     ctx.emit?.('llm/models-updated', descriptor.providerId)
   }
@@ -423,73 +587,32 @@ export function registerHitchfinRoutes(
           const packageAvailable = loadInfo !== undefined
           const packageInfo = registry.packageInfo?.(descriptor)
 
-          const views = await Promise.all(
-            accountList.map(async (account) => {
-              let raw: readonly ChannelModelRecord[] = []
-              let quota: Record<string, unknown> | null = null
-              let error: string | undefined
-              let liveFailed = false
-              // A disabled account keeps its data but is not routed; asking the
-              // vendor for its models or usage would waste calls and could show
-              // models no enabled account can serve.
-              if (loadInfo && account.enabled !== false) {
-                try {
-                  const listing = await readModelListing(
-                    worker,
-                    {
-                      channel: loadInfo,
-                      accountId: account.accountId,
-                      auth: account.auth,
-                      freeOnly: false,
-                      ...(account.proxy ? { proxy: account.proxy } : {}),
-                    },
-                    8_000,
-                  )
-                  // Never let a placeholder table through, even if an older
-                  // worker still returns one alongside the failure flag.
-                  raw = listing.liveFailed ? [] : listing.models
-                  if (listing.liveFailed) {
-                    liveFailed = true
-                    error = listing.error ?? 'live model catalog unavailable'
-                  }
-                } catch (cause) {
-                  liveFailed = true
-                  error = errorMessage(cause)
-                }
-                if (withQuota) {
-                  try {
-                    quota = (await worker.usage(
-                      {
-                        channel: loadInfo,
-                        accountId: account.accountId,
-                        auth: account.auth,
-                        ...(account.proxy ? { proxy: account.proxy } : {}),
-                      },
-                      5_000,
-                    )) as unknown as Record<string, unknown>
-                  } catch {
-                    quota = null
-                  }
-                }
-              }
-
-              const selection = selectVisibleModels(
-                raw,
-                new Set(account.hiddenModels ?? []),
-                account.freeOnly !== false,
-                descriptor.supportsFreeWindow,
-              )
-              return {
-                account,
-                raw,
-                visible: selection.models,
-                candidates: selection.candidates,
-                quota,
-                error,
-                liveFailed,
-              }
-            }),
-          )
+          const probes = await cachedListings(descriptor, accountList, loadInfo)
+          const quotas = withQuota
+            ? await cachedQuotas(descriptor, accountList, loadInfo)
+            : new Map<string, Record<string, unknown> | null>()
+          const views = accountList.map((account) => {
+            const probe = probes.get(account.accountId) ?? {
+              raw: [] as readonly ChannelModelRecord[],
+              liveFailed: false,
+            }
+            const quota = withQuota ? (quotas.get(account.accountId) ?? null) : null
+            const selection = selectVisibleModels(
+              probe.raw,
+              new Set(account.hiddenModels ?? []),
+              account.freeOnly !== false,
+              descriptor.supportsFreeWindow,
+            )
+            return {
+              account,
+              raw: probe.raw,
+              visible: selection.models,
+              candidates: selection.candidates,
+              quota,
+              error: probe.error,
+              liveFailed: probe.liveFailed,
+            }
+          })
 
           const mergedVisible = new Map<string, ChannelModelRecord>()
           const mergedAll = new Map<string, ChannelModelRecord>()
@@ -972,6 +1095,11 @@ export function registerHitchfinRoutes(
         : []
       const accountId = text(body.accountId)
       if (accountId) {
+        const account = await accounts.get(descriptor.id, accountId)
+        if (!account) {
+          sendJson(res, 404, { ok: false, error: 'unknown account' })
+          return
+        }
         await accounts.setHiddenModels(descriptor.id, accountId, hidden)
       } else {
         await accounts.setChannelHiddenModels(descriptor.id, hidden)

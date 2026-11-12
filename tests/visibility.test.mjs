@@ -1,3 +1,4 @@
+import './_fresh.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -5,6 +6,7 @@ import {
   canonicalHiddenNames,
   dedupeModels,
   isModelHidden,
+  resolveHiddenNames,
   selectVisibleModels,
 } from '../lib/models.js'
 import { registerHitchfinRoutes } from '../lib/routes.js'
@@ -360,4 +362,21 @@ test('bulk hide then show round-trips the visible model list', () => {
   assert.equal(selectVisibleModels(raw, new Set(hidden), false).models.length, 0)
   const cleared = bulkHiddenTokens(raw, hidden, 'show')
   assert.equal(selectVisibleModels(raw, new Set(cleared), false).models.length, 2)
+})
+
+test('empty loose keys never collapse distinct non-ASCII model names', () => {
+  const models = [
+    { id: 'a', name: '模型甲' },
+    { id: 'b', name: '模型乙' },
+  ]
+  const hidden = bulkHiddenTokens(models, [], 'hide')
+  const shown = bulkHiddenTokens([models[0]], hidden, 'show')
+  assert.deepEqual(shown, ['模型乙', 'b'])
+  assert.equal(selectVisibleModels([model('a', '模型甲')], new Set(['模型乙']), false).models.length, 1)
+})
+
+test('resolveHiddenNames keeps a token whose loose key is empty', () => {
+  const raw = [model('a', '模型甲'), model('b', 'Model B')]
+  const names = resolveHiddenNames(raw, new Set(['☆']))
+  assert.deepEqual([...names], ['☆'])
 })

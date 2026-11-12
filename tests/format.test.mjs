@@ -1,3 +1,4 @@
+import './_fresh.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { compactNumber, groupedNumber, parsePercent, quotaPercent, quotaValue } from '../lib/format.js'

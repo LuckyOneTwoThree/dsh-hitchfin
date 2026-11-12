@@ -24,7 +24,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/DSH-%E2%89%A50.2.2--rc.1-111827?style=flat-square" alt="DSH" />
   <img src="https://img.shields.io/badge/version-0.5.2-2F6B5F?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/tests-148%20passing-2F6B5F?style=flat-square" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-171%20passing-2F6B5F?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="license" />
 </p>
 
@@ -38,13 +38,15 @@ DSH 已经有一整套通用 API Key 供应商能力。`dsh-hitchfin` 覆盖的�
 
 ## 安装
 
-### 从 DSH 插件市场安装
+### 从 npm 安装（Web / CLI profile，推荐）
 
-插件收录后，打开 **插件 → 发现**，搜索 **dsh-hitchfin**，从卡片直接安装。宿主提示需要重启时重启 DSH。
+```sh
+dsh plugin --profile web add dsh-hitchfin
+```
 
 ### 从 GitHub 仓库直接安装（Web / CLI profile）
 
-无需等待插件市场收录，直接从仓库拉取即可。安装时会自动构建插件，需要本机有 Node.js ≥ 20.18.1 和 git。
+目前 DSH 桌面版内置的插件市场还搜不到本插件，所以最直接的方式是从仓库拉取。安装时会自动构建插件，需要本机有 Node.js ≥ 20.18.1 和 git。
 
 ```sh
 dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
@@ -54,11 +56,9 @@ dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
 
 > 如果你的 npm 提示该包的安装脚本（`prepare`）需要批准，请按提示允许；该脚本只执行 `npm run build`。
 
-### 从 npm 安装（Web / CLI profile）
+### 从 DSH 插件市场安装
 
-```sh
-dsh plugin --profile web add dsh-hitchfin
-```
+插件收录并且你的 DSH 插件市场更新后，打开 **插件 → 发现**，搜索 **dsh-hitchfin**，从卡片直接安装。**目前内置市场可能还搜不到**，请先用上面的 npm 或 GitHub 方式。
 
 ### 从本地构建安装
 

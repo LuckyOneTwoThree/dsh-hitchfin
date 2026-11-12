@@ -1,3 +1,4 @@
+import './_fresh.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { AccountStore, accountIdentity, isValidAccountId, labelFromAuth, sortAccountsByPriority } from '../lib/accounts/store.js'

@@ -64,6 +64,7 @@ async function loadMethods(descriptor) {
   const hooks = (await factory(shimInput(), {})) ?? {}
   const methods = Array.isArray(hooks.auth?.methods) ? hooks.auth.methods : []
   return {
+    hooks,
     methods: methods.map((method, index) => ({
       index,
       type: typeof method?.type === 'string' ? method.type : '',
@@ -75,6 +76,30 @@ async function loadMethods(descriptor) {
 
 const problems = []
 const notes = []
+
+/**
+ * The worker hands each package a static fallback catalog and treats a live
+ * read as failed when the package returns that table. All three packages do
+ * `return provider.models` while signed out; assert that here so a future
+ * release cannot silently change the contract the worker relies on. (A
+ * successful live read needs a real account and is covered by the smoke test.)
+ */
+async function checkModelsContract(descriptor, hooks) {
+  if (typeof hooks?.provider?.models !== 'function') {
+    return `${descriptor.id}: package exposes no provider.models hook`
+  }
+  const fallback = { 'probe-model': { id: 'probe-model', name: 'Probe' } }
+  const provider = { id: descriptor.packageProvider, models: fallback }
+  try {
+    const answer = await hooks.provider.models(provider, { auth: undefined })
+    if (answer !== fallback) {
+      return `${descriptor.id}: provider.models must return the passed-in catalog when signed out`
+    }
+  } catch (error) {
+    return `${descriptor.id}: provider.models threw while signed out: ${error?.message ?? error}`
+  }
+  return ''
+}
 
 for (const descriptor of [WORKBUDDY, QODER, TRAE]) {
   const registry = new ChannelRegistry()
@@ -99,6 +124,9 @@ for (const descriptor of [WORKBUDDY, QODER, TRAE]) {
     problems.push(`${descriptor.id}: ${result.error}`)
     continue
   }
+
+  const modelsContract = await checkModelsContract(descriptor, result.hooks)
+  if (modelsContract) problems.push(modelsContract)
 
   for (const method of descriptor.authMethods) {
     const actual = result.methods[method.index]

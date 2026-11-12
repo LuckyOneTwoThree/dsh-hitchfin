@@ -9,6 +9,14 @@ import type { HitchfinContext, ImageAttachmentRef } from './types.js'
 export const name = 'dsh-hitchfin'
 export const inject = ['llm', 'credentials', 'authorization']
 
+/**
+ * The host's native authorization flow owns its own account slot. It used to
+ * hard-code `acct-1`, which is also the first id the settings page allocates —
+ * re-authenticating through the host silently overwrote the user's primary
+ * account. Keep a dedicated slot so the two entry points never collide.
+ */
+const NATIVE_ACCOUNT_ID = 'native-1'
+
 export interface HitchfinConfig {
   /** Development: keep the fake spike provider beside the real channels. */
   devSpike?: boolean
@@ -192,7 +200,7 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
     for (const descriptor of registry.all()) {
       const firstMethod = descriptor.authMethods[0]
       if (!firstMethod) continue
-      const accountId = 'acct-1'
+      const accountId = NATIVE_ACCOUNT_ID
       const key = accountKey(descriptor.id, accountId)
       ctx.authorization.registerFlow({
         key,
@@ -241,23 +249,23 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
 
             const result = await worker.callback(loadInfo, started.session, code, existing?.proxy)
             const now = Date.now()
-            await session.commit({
-              kind: 'grant',
-              payload: {
-                // The commit replaces the whole record. Spread the stored one
-                // first so re-authenticating preserves the user's enabled
-                // switch, priority, plan, hidden models and proxy instead of
-                // silently resetting them.
-                ...(existing ?? {}),
-                channelId: descriptor.id,
-                accountId,
-                label: existing?.label ?? labelFromAuth(descriptor.displayName, result.auth),
-                auth: result.auth,
-                freeOnly: existing !== undefined ? existing.freeOnly : descriptor.freeOnlyDefault,
-                createdAt: existing?.createdAt ?? now,
-                updatedAt: now,
-              },
+            // Write through AccountStore so the native flow gets the same
+            // normalization, key validation and schema as the settings page,
+            // then let the host flow commit that exact record.
+            const saved = await accounts.save({
+              ...(existing ?? {}),
+              channelId: descriptor.id,
+              accountId,
+              label: existing?.label ?? labelFromAuth(descriptor.displayName, result.auth),
+              auth: result.auth,
+              freeOnly: existing !== undefined ? existing.freeOnly : descriptor.freeOnlyDefault,
+              createdAt: existing?.createdAt ?? now,
+              updatedAt: now,
+              ...(existing
+                ? {}
+                : { enabled: true, priority: (await accounts.list(descriptor.id)).length }),
             })
+            await session.commit({ kind: 'grant', payload: saved })
             adapter.forget(descriptor.providerId, accountId)
             adapter.invalidate(descriptor.providerId)
             ctx.emit?.('llm/models-updated', descriptor.providerId)

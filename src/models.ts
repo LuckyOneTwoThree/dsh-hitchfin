@@ -54,7 +54,11 @@ export function resolveHiddenNames(
     knownNames.add(name)
   }
   const names = new Set<string>()
-  const looseNames = [...knownNames].map((name) => [looseModelKey(name), name] as const)
+  // An all-non-ASCII name has an empty loose key; matching those would make
+  // every Chinese/symbol model name look identical.
+  const looseNames = [...knownNames]
+    .map((name) => [looseModelKey(name), name] as const)
+    .filter(([key]) => key.length > 0)
   for (const token of hidden) {
     const byId = idToName.get(token)
     if (byId) {
@@ -68,7 +72,7 @@ export function resolveHiddenNames(
     }
     // A name written before a vendor rename maps onto the current spelling.
     const loose = looseModelKey(token)
-    const match = loose && looseNames.find(([key]) => key === loose)?.[1]
+    const match = loose ? looseNames.find(([key]) => key === loose)?.[1] : undefined
     names.add(match ?? token)
   }
   return names
@@ -202,9 +206,13 @@ export function bulkHiddenTokens(
   }
   const ids = new Set(models.map((model) => model.id))
   const names = new Set(models.map((model) => normalizedModelName(model.name)))
-  const loose = new Set(models.map((model) => looseModelKey(model.name)))
-  return hidden.filter(
-    (token) =>
-      !ids.has(token) && !names.has(token) && !loose.has(looseModelKey(token)),
+  // Empty loose keys are not identities: without this filter, showing one
+  // Chinese-named model would also clear every other Chinese-named token.
+  const loose = new Set(
+    models.map((model) => looseModelKey(model.name)).filter((key) => key.length > 0),
   )
+  return hidden.filter((token) => {
+    const key = looseModelKey(token)
+    return !ids.has(token) && !names.has(token) && !(key.length > 0 && loose.has(key))
+  })
 }
