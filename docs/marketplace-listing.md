@@ -77,8 +77,8 @@ token、邮箱与真实额度。
 
 ## 五、安装介质（可选，但影响体验）
 
-**npm 发布不影响收录**，不发布也能从 GitHub 源码装。已发布包的好处是市场能按下载量排序；
-发布后 `repository.url` 必须指回本仓库，否则不会关联。本仓库 `package.json` 已带正确 `repository`。
+**npm 发布不影响收录**，不发布也能从 GitHub 源码装。发布到 npm 的好处是市场能按下载量排序；
+`repository.url` 必须指回本仓库，否则不会关联。本仓库 `package.json` 已带正确 `repository`。
 
 坑：从 GitHub 源码装要在安装期跑构建（本仓库 `lib/` `client/` 被 gitignore，靠 `prepack` 生成），
 pnpm 默认拦截构建脚本，用户会看到"允许构建脚本并重试"。要消除这一下点击，就给一个预构建 tarball：

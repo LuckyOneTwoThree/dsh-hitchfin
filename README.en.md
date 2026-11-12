@@ -44,7 +44,7 @@ Once listed, open **Plugins → Discover**, search for **dsh-hitchfin**, and ins
 
 ### Directly from the GitHub repository (web / CLI profiles)
 
-No need to wait for the market listing or an npm release. Install straight from the repo; the plugin is built automatically during install, which needs Node.js ≥ 20.18.1 and git.
+No need to wait for the market listing. Install straight from the repo; the plugin is built automatically during install, which needs Node.js ≥ 20.18.1 and git.
 
 ```sh
 dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
@@ -54,9 +54,7 @@ To pin a version, use a tag or commit, for example `github:LuckyOneTwoThree/dsh-
 
 > If your npm asks you to approve the package's install script (`prepare`), allow it; it only runs `npm run build`.
 
-### From npm (after publishing; web / CLI profiles)
-
-Use this once the package is published to npm. Until then, install from the plugin market or use the local build below.
+### From npm (web / CLI profiles)
 
 ```sh
 dsh plugin --profile web add dsh-hitchfin

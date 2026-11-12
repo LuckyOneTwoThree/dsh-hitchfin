@@ -44,7 +44,7 @@ DSH 已经有一整套通用 API Key 供应商能力。`dsh-hitchfin` 覆盖的�
 
 ### 从 GitHub 仓库直接安装（Web / CLI profile）
 
-不用等收录或发布，直接从仓库拉取即可。安装时会自动构建插件，需要本机有 Node.js ≥ 20.18.1 和 git。
+无需等待插件市场收录，直接从仓库拉取即可。安装时会自动构建插件，需要本机有 Node.js ≥ 20.18.1 和 git。
 
 ```sh
 dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
@@ -54,9 +54,7 @@ dsh plugin --profile web add github:LuckyOneTwoThree/dsh-hitchfin
 
 > 如果你的 npm 提示该包的安装脚本（`prepare`）需要批准，请按提示允许；该脚本只执行 `npm run build`。
 
-### 从 npm 安装（发布后；Web / CLI profile）
-
-包发布到 npm 后再使用下面的命令。当前尚未发布时，请用插件市场或下面的本地构建方式。
+### 从 npm 安装（Web / CLI profile）
 
 ```sh
 dsh plugin --profile web add dsh-hitchfin
