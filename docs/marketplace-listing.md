@@ -23,7 +23,7 @@
 | 含真实可跑代码（非占位/非纯 README） | ✅ TypeScript，`lib/` `client/` 安装时构建 |
 | 仓库创建满 1 天 | ✅ 2026-11-05，已 5 天 |
 | 仓库带 `dsh-plugin` topic | ✅ 已带（连同 `deepseek-harness`、`dsh`、`cordis` 等 11 个） |
-| 活跃维护 | ✅ 持续发版至 0.5.3 |
+| 活跃维护 | ✅ 持续发版至 0.5.4 |
 | 仓库未被归档 | ✅ |
 
 全部满足，可以直接提。
@@ -94,14 +94,14 @@ tarball: https://github.com/LuckyOneTwoThree/dsh-hitchfin/releases/latest/downlo
 要么名字不带版本（如上），要么钉死 tag：
 
 ```yaml
-tarball: https://github.com/LuckyOneTwoThree/dsh-hitchfin/releases/download/v0.5.3/dsh-hitchfin.tgz
+tarball: https://github.com/LuckyOneTwoThree/dsh-hitchfin/releases/download/v0.5.4/dsh-hitchfin.tgz
 ```
 
 `tarball` 只有"仓库无法从源码安装"时才是必需项，我们是可选项。
 
 ## 六、提 PR 的流程
 
-1. 确认本仓库 `main` 已包含要收录的版本（当前 0.5.3，tag `v0.5.3`）。
+1. 确认本仓库 `main` 已包含要收录的版本（当前 0.5.4，tag `v0.5.4`）。
 2. Fork `awesome-dsh-plugin/awesome-dsh-plugin`。
 3. 加 `data/plugins/LuckyOneTwoThree__dsh-hitchfin.yml`，内容见第三节。若要加 tarball 行，也写进这个文件。
 4. 开 PR，标题写清插件名，正文说明它做什么、装法、以及"个人订阅账号自用、无自动签到/免限流/账号共享"。
