@@ -72,3 +72,14 @@ test('the two locale files expose the same keys', () => {
     assert.ok(zh[key].length > 0 && en[key].length > 0)
   }
 })
+
+test('package manifest declares matching open host compatibility ranges', () => {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+  assert.equal(pkg.engines?.dsh, '>=0.2.2-rc.1')
+  assert.equal(pkg.dsh?.engines?.dsh, pkg.engines?.dsh)
+  for (const [dep, range] of Object.entries(pkg.peerDependencies ?? {})) {
+    if (dep === '@deepseek-ai/dsh' || dep.startsWith('@deepseek-ai/dsh-')) {
+      assert.equal(range, pkg.engines.dsh, `${dep} should not exact-pin host version`)
+    }
+  }
+})
