@@ -275,6 +275,7 @@ async function request(services, method, path, body) {
   const cleanup = registerHitchfinRoutes(ctx, services)
   const req = makeReq(method, path)
   if (body !== undefined) {
+    req.headers['content-type'] = 'application/json'
     req[Symbol.asyncIterator] = async function* () {
       yield Buffer.from(JSON.stringify(body))
     }

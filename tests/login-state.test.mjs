@@ -17,15 +17,19 @@ const descriptor = {
   freeOnlyDefault: true,
 }
 
-function makeReq(method, path, body) {
-  const payload = body === undefined ? '' : JSON.stringify(body)
+function makeReq(method, path, body, extraHeaders = {}) {
+  const raw = typeof body === 'string' ? body : body === undefined ? '' : JSON.stringify(body)
   return {
     method,
     url: path,
-    headers: { origin: 'http://127.0.0.1' },
+    headers: {
+      origin: 'http://127.0.0.1',
+      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+      ...extraHeaders,
+    },
     socket: { remoteAddress: '127.0.0.1' },
     async *[Symbol.asyncIterator]() {
-      if (payload) yield Buffer.from(payload)
+      if (raw) yield Buffer.from(raw)
     },
   }
 }
@@ -461,6 +465,229 @@ test('a text/plain body is refused before it reaches a settings handler', async 
     }
     assert.equal(res.statusCode, 400)
   } finally {
+    cleanup()
+  }
+})
+
+test('CSRF fence refuses Origin: null and non-JSON simple-request writes', async () => {
+  const existing = [
+    { accountId: 'acct-1', channelId: 'workbuddy-cn', auth: { type: 'oauth', access: 'token' } },
+  ]
+  let deleted = false
+  let handler
+  const cleanup = registerHitchfinRoutes(
+    {
+      webServer: {
+        register(route) {
+          handler = route.handler
+          return () => {}
+        },
+      },
+      logger: { info() {}, warn() {} },
+      emit() {},
+      get: () => undefined,
+    },
+    {
+      registry: { all: () => [descriptor], loadInfo: () => undefined },
+      accounts: {
+        get: async (_c, id) => existing.find((e) => e.accountId === id),
+        list: async () => existing,
+        nextAccountId: async () => 'acct-2',
+        save: async (p) => p,
+        delete: async () => {
+          deleted = true
+        },
+      },
+      worker: {},
+      adapter: { invalidate() {}, forget() {} },
+    },
+  )
+  const send = async (req) => {
+    const res = makeRes()
+    handler(req, res)
+    for (let i = 0; i < 50 && !res.body; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    return { status: res.statusCode, json: JSON.parse(res.body || '{}') }
+  }
+  try {
+    const nullOrigin = await send(
+      makeReq('POST', `${PREFIX}/delete`, { channelId: 'workbuddy-cn', accountId: 'acct-1' }, {
+        origin: 'null',
+        host: '127.0.0.1:3000',
+        'content-type': 'application/x-www-form-urlencoded',
+      }),
+    )
+    assert.equal(nullOrigin.status, 403)
+
+    const formContentType = await send(
+      makeReq('POST', `${PREFIX}/delete`, { channelId: 'workbuddy-cn', accountId: 'acct-1' }, {
+        'content-type': 'application/x-www-form-urlencoded',
+      }),
+    )
+    assert.equal(formContentType.status, 400)
+
+    const missingType = await send(
+      makeReq('POST', `${PREFIX}/free-only`, '{"channelId":"workbuddy-cn"}', {
+        'content-type': undefined,
+      }),
+    )
+    assert.equal(missingType.status, 400)
+
+    const badJson = await send(makeReq('POST', `${PREFIX}/free-only`, '{not-json'))
+    assert.equal(badJson.status, 400)
+    assert.match(badJson.json.error, /invalid JSON/)
+
+    const badHidden = await invoke(handler, 'POST', `${PREFIX}/models/hidden`, {
+      channelId: 'workbuddy-cn',
+    })
+    assert.equal(badHidden.status, 400)
+    assert.match(badHidden.json.error, /array/)
+
+    assert.equal(deleted, false)
+  } finally {
+    cleanup()
+  }
+})
+
+test('plugin cleanup cancels in-flight logins so a late callback never saves', async () => {
+  let emitted = 0
+  let handler
+  let release
+  let cancelCount = 0
+  const saved = []
+  const callbackGate = new Promise((resolve) => {
+    release = resolve
+  })
+  const cleanup = registerHitchfinRoutes(
+    {
+      webServer: {
+        register(route) {
+          handler = route.handler
+          return () => {}
+        },
+      },
+      logger: { info() {}, warn() {} },
+      emit() {
+        emitted += 1
+      },
+      get: () => undefined,
+    },
+    {
+      registry: {
+        all: () => [descriptor],
+        loadInfo: () => ({
+          channelId: descriptor.id,
+          packagePath: '/tmp/mock.mjs',
+          exportName: 'Mock',
+          provider: 'workbuddy',
+        }),
+      },
+      accounts: {
+        get: async () => undefined,
+        list: async () => [],
+        nextAccountId: async () => 'acct-1',
+        save: async (payload) => {
+          saved.push(payload)
+          return payload
+        },
+      },
+      worker: {
+        authorize: async () => ({ session: 'session-late', method: 'auto' }),
+        callback: () => callbackGate.then(() => ({ auth: { type: 'oauth', access: 'token' } })),
+        cancelAuth() {
+          cancelCount += 1
+        },
+      },
+      adapter: { invalidate() {}, forget() {} },
+    },
+  )
+  const started = await invoke(handler, 'POST', `${PREFIX}/login/start`, {
+    channelId: descriptor.id,
+    method: 0,
+    accountId: 'new',
+  })
+  assert.equal(started.status, 200)
+  cleanup()
+  assert.equal(cancelCount, 1)
+  release()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(saved.length, 0)
+  assert.equal(emitted, 0)
+})
+
+test('concurrent new-account logins reserve distinct accountIds', async () => {
+  const existing = []
+  let seq = 0
+  let handler
+  const resolvers = []
+  const cleanup = registerHitchfinRoutes(
+    {
+      webServer: {
+        register(route) {
+          handler = route.handler
+          return () => {}
+        },
+      },
+      logger: { info() {}, warn() {} },
+      emit() {},
+      get: () => undefined,
+    },
+    {
+      registry: {
+        all: () => [descriptor],
+        loadInfo: () => ({
+          channelId: descriptor.id,
+          packagePath: '/tmp/mock.mjs',
+          exportName: 'Mock',
+          provider: 'workbuddy',
+        }),
+      },
+      accounts: {
+        get: async () => undefined,
+        list: async () => existing,
+        nextAccountId: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          return `acct-${existing.length + 1}`
+        },
+        save: async (payload) => {
+          existing.push(payload)
+          return payload
+        },
+      },
+      worker: {
+        authorize: async (_loadInfo, accountId) => {
+          seq += 1
+          return { session: `s-${seq}:${accountId}`, method: 'auto' }
+        },
+        callback: () =>
+          new Promise((resolve) => {
+            resolvers.push(() => resolve({ auth: { type: 'oauth', access: `tok-${resolvers.length}` } }))
+          }),
+        cancelAuth() {},
+      },
+      adapter: { invalidate() {}, forget() {} },
+    },
+  )
+  try {
+    const [a, b] = await Promise.all([
+      invoke(handler, 'POST', `${PREFIX}/login/start`, {
+        channelId: descriptor.id,
+        method: 0,
+        accountId: 'new',
+      }),
+      invoke(handler, 'POST', `${PREFIX}/login/start`, {
+        channelId: descriptor.id,
+        method: 0,
+        accountId: 'new',
+      }),
+    ])
+    assert.equal(a.status, 200)
+    assert.equal(b.status, 200)
+    assert.notEqual(a.json.login.accountId, b.json.login.accountId)
+    assert.deepEqual([a.json.login.accountId, b.json.login.accountId].sort(), ['acct-1', 'acct-2'])
+  } finally {
+    for (const r of resolvers) r()
     cleanup()
   }
 })

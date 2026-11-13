@@ -1,5 +1,11 @@
 import { HitchfinAdapter, SPIKE_PROVIDER } from './adapter/hitchfin-adapter.js'
-import { AccountStore, accountKey, labelFromAuth } from './accounts/store.js'
+import {
+  AccountStore,
+  accountKey,
+  labelFromAuth,
+  normalizeStoredAuth,
+  type AccountPayload,
+} from './accounts/store.js'
 import { HitchfinError, errorMessage } from './errors.js'
 import { ChannelRegistry } from './channels/registry.js'
 import { ChannelWorkerHost } from './host/worker-host.js'
@@ -117,14 +123,18 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
     canReadImages: () => attachmentReader(ctx) !== undefined,
   })
 
+  let disposed = false
+
   // A channel package can refresh its own token through client.auth.set(). The
   // failure that triggered the refresh may have put the account in AUTH
   // cooldown; persist the auth and clear that routing state, but never let a
   // rejected credentials write escape as an unhandled rejection.
   authChanged = (channelId, accountId, auth) => {
+    if (disposed) return
     void accounts
       .updateAuth(channelId, accountId, auth)
       .then(() => {
+        if (disposed) return
         const descriptor = registry.all().find((entry) => entry.id === channelId)
         if (descriptor) adapter.forget(descriptor.providerId, accountId)
       })
@@ -161,7 +171,6 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
   const routeServices = { registry, accounts, worker, adapter }
   const cleanups: Array<() => void> = []
   const flowCleanups: Array<() => void> = []
-  let disposed = false
   // A deferred `ctx.inject` callback can arrive after the plugin fiber ends;
   // registering then would leak a route that nothing unregisters.
   const registerRoutes = (scope: HitchfinContext): void => {
@@ -231,6 +240,9 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
         label: descriptor.displayName,
         methods: [{ id: firstMethod.id, label: firstMethod.label }],
         async run(session) {
+          if (disposed || session.signal.aborted) {
+            throw new Error('sign-in cancelled')
+          }
           const loadInfo = registry.loadInfo(descriptor)
           if (!loadInfo) {
             throw new Error(
@@ -239,6 +251,9 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
           }
 
           const existing = await accounts.get(descriptor.id, accountId).catch(() => undefined)
+          if (disposed || session.signal.aborted) {
+            throw new Error('sign-in cancelled')
+          }
           const started = await worker.authorize(
             loadInfo,
             accountId,
@@ -246,16 +261,20 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
             {},
             existing?.proxy,
           )
-          const onAbort = () => {
+          const cancelWorkerAuth = () => {
             try {
               worker.cancelAuth(started.session)
             } catch {
               // The worker may already be stopping.
             }
           }
-          session.signal.addEventListener('abort', onAbort, { once: true })
+          let settled = false
+          session.signal.addEventListener('abort', cancelWorkerAuth, { once: true })
 
           try {
+            if (disposed || session.signal.aborted) {
+              throw new Error('sign-in cancelled')
+            }
             if (started.url || started.instructions) {
               session.notify({
                 message: started.instructions || `Continue signing in to ${descriptor.displayName}`,
@@ -269,33 +288,46 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
                 kind: 'text',
                 message: `Paste the ${descriptor.displayName} authorization code`,
               })
+              if (disposed || session.signal.aborted) {
+                throw new Error('sign-in cancelled')
+              }
             }
 
             const result = await worker.callback(loadInfo, started.session, code, existing?.proxy)
+            if (disposed || session.signal.aborted) {
+              throw new Error('sign-in cancelled')
+            }
             const now = Date.now()
-            // Write through AccountStore so the native flow gets the same
-            // normalization, key validation and schema as the settings page,
-            // then let the host flow commit that exact record.
-            const saved = await accounts.save({
+            const storedAccounts = existing ? undefined : await accounts.list(descriptor.id)
+            if (disposed || session.signal.aborted) {
+              throw new Error('sign-in cancelled')
+            }
+            const payload: AccountPayload = {
               ...(existing ?? {}),
               channelId: descriptor.id,
               accountId,
               label: existing?.label ?? labelFromAuth(descriptor.displayName, result.auth),
-              auth: result.auth,
+              auth: normalizeStoredAuth(result.auth),
               freeOnly: existing !== undefined ? existing.freeOnly : descriptor.freeOnlyDefault,
               createdAt: existing?.createdAt ?? now,
               updatedAt: now,
               ...(existing
                 ? {}
-                : { enabled: true, priority: (await accounts.list(descriptor.id)).length }),
-            })
-            await session.commit({ kind: 'grant', payload: saved })
+                : { enabled: true, priority: storedAccounts!.length }),
+            }
+            // Commit through the host flow first so a failed or aborted host
+            // grant never leaves orphaned credentials behind in AccountStore.
+            await session.commit({ kind: 'grant', payload })
+            await accounts.save(payload)
+            settled = true
+            if (disposed) return
             adapter.forget(descriptor.providerId, accountId)
             adapter.invalidate(descriptor.providerId)
             ctx.emit?.('llm/models-updated', descriptor.providerId)
             ctx.logger.info(`dsh-hitchfin: signed in to ${descriptor.displayName}`)
           } finally {
-            session.signal.removeEventListener('abort', onAbort)
+            session.signal.removeEventListener('abort', cancelWorkerAuth)
+            if (!settled) cancelWorkerAuth()
           }
         },
       })

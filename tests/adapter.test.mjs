@@ -2,6 +2,7 @@ import './_fresh.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { HitchfinAdapter, SPIKE_PROVIDER } from '../lib/adapter/hitchfin-adapter.js'
+import { buildAnthropicMessages } from '../lib/adapter/anthropic-sse.js'
 import { buildOpenAiMessages } from '../lib/adapter/openai-sse.js'
 import { HitchfinError } from '../lib/errors.js'
 import { dedupeModels } from '../lib/models.js'
@@ -604,4 +605,95 @@ test('buildOpenAiMessages handles multimodal images and direct toolCallId', () =
     tool_call_id: 'call_999',
     content: 'result text',
   })
+})
+
+test('adapter invalidate during in-flight listModels blocks stale cache writes', async () => {
+  let releaseFirst
+  let callIndex = 0
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve
+  })
+  const adapter = makeAdapter({
+    accounts: makeAccounts([account('acct-1')]),
+    worker: {
+      models: async () => {
+        callIndex += 1
+        if (callIndex === 1) {
+          await firstGate
+          return [
+            { id: 'stale-model', name: 'Stale', input: ['text'], efforts: [], free: true, freeKnown: true },
+          ]
+        }
+        return [
+          { id: 'fresh-model', name: 'Fresh', input: ['text'], efforts: [], free: true, freeKnown: true },
+        ]
+      },
+      fetch: async () => sseResponse(),
+    },
+  })
+
+  const firstPromise = adapter.listModels(descriptor.providerId)
+  await new Promise((resolve) => setTimeout(resolve, 15))
+  adapter.invalidate(descriptor.providerId)
+  const fresh = await adapter.listModels(descriptor.providerId)
+  assert.deepEqual(
+    fresh.map((m) => m.id),
+    ['fresh-model'],
+  )
+
+  releaseFirst()
+  await firstPromise
+  const cached = adapter.cachedModels(descriptor.providerId)
+  assert.deepEqual(
+    cached.map((m) => m.id),
+    ['fresh-model'],
+  )
+})
+
+test('adapter.stream exits immediately with aborted when signal is already aborted', async () => {
+  let fetchCalls = 0
+  let modelCalls = 0
+  const adapter = makeAdapter({
+    accounts: makeAccounts([account('acct-1')]),
+    worker: {
+      models: async () => {
+        modelCalls += 1
+        return makeWorker().models()
+      },
+      fetch: async () => {
+        fetchCalls += 1
+        return sseResponse()
+      },
+    },
+  })
+  const controller = new AbortController()
+  controller.abort()
+  const chunks = await collect(
+    adapter.stream({
+      provider: descriptor.providerId,
+      model: 'free-model',
+      messages: [],
+      signal: controller.signal,
+    }),
+  )
+  assert.equal(chunks.length, 1)
+  assert.equal(chunks[0].type, 'finish')
+  assert.equal(chunks[0].reason.kind, 'aborted')
+  assert.equal(modelCalls, 0)
+  assert.equal(fetchCalls, 0)
+})
+
+test('buildAnthropicMessages infers media_type from data URI image strings', () => {
+  const built = buildAnthropicMessages([
+    {
+      role: 'user',
+      content: [{ type: 'image', image: 'data:image/jpeg;base64,abc123' }],
+    },
+  ])
+  assert.deepEqual(built.messages[0].content, [
+    {
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/jpeg', data: 'abc123' },
+    },
+  ])
 })

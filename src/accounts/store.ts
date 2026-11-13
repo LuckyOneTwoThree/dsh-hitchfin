@@ -220,14 +220,17 @@ export class AccountStore {
 
   /** Persist the visible account order as explicit priorities. */
   async setPriorities(channelId: string, orderedIds: readonly string[]): Promise<void> {
-    const existing = await this.list(channelId)
+    const existing = sortAccountsByPriority(await this.list(channelId))
     const byId = new Map(existing.map((account) => [account.accountId, account]))
     // Listed accounts come first in the requested order; anything the caller
-    // omitted keeps its relative order at the end. A partial list must not
-    // leave two accounts sharing one priority.
-    const listed = orderedIds.filter((id) => byId.has(id))
+    // omitted keeps its current priority order at the end. A partial list
+    // must not leave two accounts sharing one priority.
+    const listed = [...new Set(orderedIds.filter((id) => byId.has(id)))]
     const listedSet = new Set(listed)
-    const ordered = [...listed, ...existing.map((a) => a.accountId).filter((id) => !listedSet.has(id))]
+    const ordered = [
+      ...listed,
+      ...existing.map((a) => a.accountId).filter((id) => !listedSet.has(id)),
+    ]
     for (const [index, accountId] of ordered.entries()) {
       await this.update(channelId, accountId, (current) => ({
         ...current,

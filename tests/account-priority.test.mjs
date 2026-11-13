@@ -141,7 +141,10 @@ function makeReq(method, path, body) {
   return {
     method,
     url: path,
-    headers: { origin: 'http://127.0.0.1' },
+    headers: {
+      origin: 'http://127.0.0.1',
+      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+    },
     socket: { remoteAddress: '127.0.0.1' },
     async *[Symbol.asyncIterator]() {
       if (payload) yield Buffer.from(payload)
@@ -329,4 +332,24 @@ test('/account/order persists the visible order as priorities', async () => {
   } finally {
     cleanup()
   }
+})
+
+test('partial setPriorities preserves relative priority order of unlisted accounts', async () => {
+  const store = new AccountStore(fakeCredentials())
+  // Store records in an enumeration order that disagrees with their priorities:
+  // enumeration: acct-1, acct-3, acct-2; priorities: acct-2=0, acct-3=1, acct-1=2.
+  await store.save(account('acct-1', { priority: 2 }))
+  await store.save(account('acct-3', { priority: 1 }))
+  await store.save(account('acct-2', { priority: 0 }))
+
+  await store.setPriorities(descriptor.id, ['acct-1'])
+  const ordered = sortAccountsByPriority(await store.list(descriptor.id))
+  assert.deepEqual(
+    ordered.map((entry) => [entry.accountId, entry.priority]),
+    [
+      ['acct-1', 0],
+      ['acct-2', 1],
+      ['acct-3', 2],
+    ],
+  )
 })

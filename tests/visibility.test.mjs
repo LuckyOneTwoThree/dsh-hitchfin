@@ -400,3 +400,35 @@ test('showing one model removes its name, id and loose spellings', () => {
     ['other'],
   )
 })
+
+test('showing a model removes legacy alias ids written before winner deduplication', () => {
+  const raw = [
+    model('deepseek-v4.1-flash_advisor_', 'DeepSeek V4.1 Flash'),
+    model('deepseek-v4.1-flash', 'DeepSeek V4.1 Flash'),
+  ]
+  const legacyHidden = ['deepseek-v4.1-flash_advisor_', 'other-model']
+  // With raw catalog context, unhideModelTokens and bulkHiddenTokens clear the alias id too.
+  const viaRaw = unhideModelTokens(
+    legacyHidden,
+    { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' },
+    raw,
+  )
+  assert.deepEqual(viaRaw, ['other-model'])
+  assert.equal(selectVisibleModels(raw, new Set(viaRaw), false).models.length, 1)
+
+  const viaBulkRaw = bulkHiddenTokens(
+    [{ id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' }],
+    legacyHidden,
+    'show',
+    raw,
+  )
+  assert.deepEqual(viaBulkRaw, ['other-model'])
+
+  // With explicit aliases on ModelToken (as returned by /state), raw catalog is not needed.
+  const viaAliases = unhideModelTokens(legacyHidden, {
+    id: 'deepseek-v4.1-flash',
+    name: 'DeepSeek V4.1 Flash',
+    aliases: ['deepseek-v4.1-flash_advisor_'],
+  })
+  assert.deepEqual(viaAliases, ['other-model'])
+})

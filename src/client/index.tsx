@@ -44,6 +44,7 @@ interface Model {
   name: string
   free: boolean
   freeKnown?: boolean
+  aliases?: readonly string[]
 }
 
 interface QuotaWindow extends QuotaWindowLike {
@@ -262,10 +263,12 @@ function cooldownLeft(until: number | undefined, now: number): string {
 }
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
+  const method = init?.method?.toUpperCase() ?? 'GET'
+  const needsJsonType = init?.body !== undefined || (method !== 'GET' && method !== 'HEAD')
   const response = await fetch(url, {
     ...init,
     headers: {
-      ...(init?.body ? { 'content-type': 'application/json' } : {}),
+      ...(needsJsonType ? { 'content-type': 'application/json' } : {}),
       ...(init?.headers ?? {}),
     },
   })
@@ -676,7 +679,14 @@ export function HitchfinSettings() {
         connected: channels.filter((entry) => entry.accounts.length > 0).length,
         total: channels.length,
         accounts: channels.reduce((sum, entry) => sum + entry.accounts.length, 0),
-        models: channels.reduce((sum, entry) => sum + Math.max(0, entry.modelCount), 0),
+        models: channels.reduce(
+          (sum, entry) =>
+            sum +
+            (entry.allModels.length > 0
+              ? visibleModels(entry).length
+              : Math.max(0, entry.modelCount)),
+          0,
+        ),
       }
     : null
   const channelLogin = login && channel && login.channelId === channel.id ? login : null
@@ -876,6 +886,7 @@ export function HitchfinSettings() {
 
   const toggleFreeOnly = async (target: Channel) => {
     const next = !target.freeOnly
+    requestSeq.current += 1
     setChannels((list) =>
       list
         ? list.map((entry) => (entry.id === target.id ? { ...entry, freeOnly: next } : entry))
@@ -908,6 +919,7 @@ export function HitchfinSettings() {
     message?: string,
   ) => {
     if (modelBusy) return
+    requestSeq.current += 1
     setChannels((list) =>
       list
         ? list.map((entry) =>
@@ -943,7 +955,7 @@ export function HitchfinSettings() {
     // Drop the canonical name, its loose spellings and any legacy id so a
     // toggle always flips. Store both name and id: a vendor rename must not
     // bring a hidden model back when the live catalog replaces the fallback.
-    const cleaned = unhideModelTokens(previous, model)
+    const cleaned = unhideModelTokens(previous, model, target.allModels)
     void persistHidden(
       target,
       wasHidden ? cleaned : [...new Set([...cleaned, key, model.id])],
@@ -953,6 +965,7 @@ export function HitchfinSettings() {
 
   const persistEnabled = async (target: Channel, accountId: string, enabled: boolean) => {
     if (busy !== '') return
+    requestSeq.current += 1
     const apply = (value: boolean) => (list: Channel[] | null) =>
       list
         ? list.map((entry) =>
@@ -983,6 +996,10 @@ export function HitchfinSettings() {
           ? T('账号已启用', 'Account enabled')
           : T('账号已停用，凭据与设置已保留', 'Account disabled; credentials kept'),
       )
+      void refresh(false)
+      schedule(() => {
+        void refresh(true)
+      }, 350)
     } catch (err) {
       setChannels(apply(!enabled))
       showToast('error', err instanceof Error ? err.message : String(err))
@@ -993,6 +1010,7 @@ export function HitchfinSettings() {
 
   const persistOrder = async (target: Channel, ordered: Account[], previous: Account[]) => {
     if (busy !== '') return
+    requestSeq.current += 1
     const replace = (accounts: Account[]) => (list: Channel[] | null) =>
       list
         ? list.map((entry) => (entry.id === target.id ? { ...entry, accounts } : entry))
@@ -1047,8 +1065,11 @@ export function HitchfinSettings() {
   ) => {
     if (modelBusy || models.length === 0) return
     const previous = [...(target.hiddenModels ?? [])]
-    const next = bulkHiddenTokens(models, previous, action)
-    if (next.length === previous.length) {
+    const previousSet = new Set(previous)
+    const changed = models.filter((model) =>
+      action === 'show' ? isModelHidden(model, previousSet) : !isModelHidden(model, previousSet),
+    ).length
+    if (changed === 0) {
       showToast(
         'success',
         action === 'show'
@@ -1057,8 +1078,7 @@ export function HitchfinSettings() {
       )
       return
     }
-    const changed =
-      action === 'show' ? previous.length - next.length : next.length - previous.length
+    const next = bulkHiddenTokens(models, previous, action, target.allModels)
     void persistHidden(
       target,
       next,
@@ -1072,16 +1092,18 @@ export function HitchfinSettings() {
   const hidePaidModels = (target: Channel) => {
     if (modelBusy) return
     const previous = [...(target.hiddenModels ?? [])]
-    const next = bulkHiddenTokens(paidModels, previous, 'hide')
-    if (next.length === previous.length) {
+    const previousSet = new Set(previous)
+    const toHide = paidModels.filter((model) => !isModelHidden(model, previousSet))
+    if (toHide.length === 0) {
       showToast('success', T('没有需要隐藏的付费模型', 'No paid models to hide'))
       return
     }
+    const next = bulkHiddenTokens(toHide, previous, 'hide', target.allModels)
     void persistHidden(
       target,
       next,
       previous,
-      T(`已隐藏 ${next.length - previous.length} 个付费模型`, `Hid ${next.length - previous.length} paid models`),
+      T(`已隐藏 ${toHide.length} 个付费模型`, `Hid ${toHide.length} paid models`),
     )
   }
 
@@ -1113,6 +1135,7 @@ export function HitchfinSettings() {
       })
       const updated = body.account
       if (updated) {
+        requestSeq.current += 1
         setChannels((list) =>
           list
             ? list.map((entry) =>
@@ -1137,6 +1160,10 @@ export function HitchfinSettings() {
       setProxyFor('')
       setProxyDraft('')
       showToast('success', value ? T('代理已保存', 'Proxy saved') : T('已改为直连', 'Proxy cleared'))
+      void refresh(false)
+      schedule(() => {
+        void refresh(true)
+      }, 350)
     } catch (err) {
       setProxyError(err instanceof Error ? err.message : String(err))
     } finally {

@@ -44,10 +44,14 @@ function imageSource(block: Record<string, unknown>): Block | null {
   }
 
   if (typeof block.image === 'string') {
-    const mime = typeof block.mimeType === 'string' ? block.mimeType : 'image/png'
-    const data = block.image.startsWith('data:')
-      ? /^data:[^;,]+;base64,(.*)$/s.exec(block.image)?.[1] ?? ''
-      : block.image
+    const match = block.image.startsWith('data:')
+      ? /^data:([^;,]+);base64,(.*)$/s.exec(block.image)
+      : null
+    const mime =
+      typeof block.mimeType === 'string' && block.mimeType
+        ? block.mimeType
+        : (match?.[1] ?? 'image/png')
+    const data = block.image.startsWith('data:') ? (match?.[2] ?? '') : block.image
     if (data) {
       return {
         type: 'image',

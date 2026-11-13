@@ -2,7 +2,12 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { errorMessage } from './errors.js'
-import { canonicalHiddenNames, dedupeModels, selectVisibleModels } from './models.js'
+import {
+  canonicalHiddenNames,
+  dedupeModels,
+  normalizedModelName,
+  selectVisibleModels,
+} from './models.js'
 import {
   accountIdentity,
   isValidAccountId,
@@ -58,13 +63,21 @@ interface StateProbe {
 interface ListingCacheEntry {
   at: number
   signature: string
+  generation: number
   probes: Map<string, StateProbe>
 }
 
 interface QuotaCacheEntry {
   at: number
   signature: string
+  generation: number
   value: Record<string, unknown> | null
+}
+
+interface InflightEntry<T> {
+  signature: string
+  generation: number
+  promise: Promise<T>
 }
 
 /** Settings reads share one short-lived vendor snapshot per channel. */
@@ -151,8 +164,12 @@ function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerRes
   }
 
   const origin = req.headers.origin
-  if (origin === undefined || origin === 'null' || origin === '') {
+  if (origin === undefined || origin === '') {
     return false
+  }
+  if (origin === 'null') {
+    sendJson(res, 403, { ok: false, error: 'origin refused' })
+    return true
   }
 
   try {
@@ -176,12 +193,19 @@ function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerRes
 /** A malformed request from the settings page, reported as 400 rather than 500. */
 class BadRequestError extends Error {}
 
+function isJsonContentType(header: string | undefined): boolean {
+  if (typeof header !== 'string') return false
+  const mime = header.split(';', 1)[0].trim().toLowerCase()
+  return mime === 'application/json' || mime.endsWith('+json')
+}
+
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   const header = req.headers['content-type']
-  const contentType = typeof header === 'string' ? header : ''
-  // A sandboxed page or an HTML form can only send text/plain without a CORS
-  // preflight, so it is the one content type a settings write must refuse.
-  if (contentType.startsWith('text/plain')) throw new BadRequestError('unsupported content type')
+  // Browser forms and no-cors fetches cannot send application/json without a
+  // CORS preflight, so refusing anything else blocks simple-request CSRF.
+  if (!isJsonContentType(typeof header === 'string' ? header : undefined)) {
+    throw new BadRequestError('unsupported content type')
+  }
   let size = 0
   const chunks: Buffer[] = []
   for await (const chunk of req) {
@@ -193,7 +217,12 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   if (chunks.length === 0) return {}
   const text = Buffer.concat(chunks).toString('utf8')
   if (!text.trim()) return {}
-  const parsed = JSON.parse(text) as unknown
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text) as unknown
+  } catch {
+    throw new BadRequestError('invalid JSON body')
+  }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new BadRequestError('request body must be an object')
   }
@@ -306,16 +335,6 @@ function parseProxy(value: unknown): { proxy?: string; error?: string } {
   }
 }
 
-async function resolveAccountId(
-  accountStore: AccountStore,
-  channelId: string,
-  requested: unknown,
-): Promise<string> {
-  const wanted = typeof requested === 'string' ? requested.trim() : ''
-  if (wanted && wanted !== 'new') return wanted
-  return accountStore.nextAccountId(channelId)
-}
-
 export interface HitchfinRouteOptions {
   /** Tests shorten this; production keeps the ten-minute login window. */
   loginTtlMs?: number
@@ -334,11 +353,68 @@ export function registerHitchfinRoutes(
     return () => {}
   }
 
+  let disposed = false
   const logins = new Map<string, LoginState>()
   const loginTimers = new Set<NodeJS.Timeout>()
+  const loginReleases = new Map<string, () => void>()
+  const pendingAccountIds = new Map<string, Set<string>>()
+  const reservationLocks = new Map<string, Promise<void>>()
 
-  const trackLogin = (state: LoginState): void => {
+  const releaseLoginAccount = (id: string): void => {
+    const release = loginReleases.get(id)
+    if (!release) return
+    loginReleases.delete(id)
+    release()
+  }
+
+  // Two concurrent "add account" logins must not allocate the same `acct-N`
+  // before either writes to disk. Serialize ID selection per channel and
+  // hold the chosen ID in memory until the attempt settles or cancels.
+  async function reserveAccountId(
+    channelId: string,
+    requested: unknown,
+  ): Promise<{ accountId: string; release: () => void }> {
+    const wanted = typeof requested === 'string' ? requested.trim() : ''
+    if (wanted && wanted !== 'new') {
+      return { accountId: wanted, release: () => {} }
+    }
+    const allocate = async () => {
+      const nextFromStore = await accounts.nextAccountId(channelId)
+      const pending = pendingAccountIds.get(channelId) ?? new Set<string>()
+      pendingAccountIds.set(channelId, pending)
+      let candidate = nextFromStore
+      if (pending.has(candidate)) {
+        const match = /^acct-(\d+)$/.exec(nextFromStore)
+        let n = match ? Number(match[1]) + 1 : 1
+        while (pending.has(`acct-${n}`)) n += 1
+        candidate = `acct-${n}`
+      }
+      pending.add(candidate)
+      return {
+        accountId: candidate,
+        release: () => {
+          pending.delete(candidate)
+          if (pending.size === 0) pendingAccountIds.delete(channelId)
+        },
+      }
+    }
+    const previous = reservationLocks.get(channelId) ?? Promise.resolve()
+    const result = previous.then(allocate, allocate)
+    const lock = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    reservationLocks.set(channelId, lock)
+    try {
+      return await result
+    } finally {
+      if (reservationLocks.get(channelId) === lock) reservationLocks.delete(channelId)
+    }
+  }
+
+  const trackLogin = (state: LoginState, releaseAccount?: () => void): void => {
     logins.set(state.id, state)
+    if (releaseAccount) loginReleases.set(state.id, releaseAccount)
     const timer = setTimeout(() => {
       loginTimers.delete(timer)
       if (logins.get(state.id) !== state) return
@@ -353,6 +429,7 @@ export function registerHitchfinRoutes(
           // The worker may already be stopping.
         }
       }
+      releaseLoginAccount(state.id)
       logins.delete(state.id)
     }, loginTtlMs)
     timer.unref?.()
@@ -364,9 +441,15 @@ export function registerHitchfinRoutes(
   // Share one short-lived snapshot per channel and single-flight concurrent
   // reads; account settings are still applied fresh on every response.
   const listingCache = new Map<string, ListingCacheEntry>()
-  const listingInflight = new Map<string, Promise<Map<string, StateProbe>>>()
+  const listingInflight = new Map<string, InflightEntry<Map<string, StateProbe>>>()
   const quotaCache = new Map<string, QuotaCacheEntry>()
-  const quotaInflight = new Map<string, Promise<Record<string, unknown> | null>>()
+  const quotaInflight = new Map<string, InflightEntry<Record<string, unknown> | null>>()
+  const channelGenerations = new Map<string, number>()
+  const latestListingSignature = new Map<string, string>()
+  const latestQuotaSignature = new Map<string, string>()
+  const lastRawModels = new Map<string, ReadonlyMap<string, ChannelModelRecord>>()
+
+  const generationOf = (channelId: string): number => channelGenerations.get(channelId) ?? 0
 
   /** Anything that changes what the vendor would answer invalidates a probe. */
   const stateSignature = (accountList: readonly AccountPayload[]): string =>
@@ -398,14 +481,23 @@ export function registerHitchfinRoutes(
   ): Promise<Map<string, StateProbe>> {
     const key = descriptor.id
     const signature = stateSignature(accountList)
+    latestListingSignature.set(key, signature)
+    const generation = generationOf(key)
     const cached = listingCache.get(key)
-    if (cached && cached.signature === signature && Date.now() - cached.at < STATE_TTL_MS) {
+    if (
+      cached &&
+      cached.signature === signature &&
+      cached.generation === generation &&
+      Date.now() - cached.at < STATE_TTL_MS
+    ) {
       return cached.probes
     }
     const inflight = listingInflight.get(key)
-    if (inflight) return inflight
+    if (inflight && inflight.signature === signature && inflight.generation === generation) {
+      return inflight.promise
+    }
 
-    const task = (async () => {
+    const promise = (async () => {
       const probes = new Map<string, StateProbe>()
       if (loadInfo) {
         await Promise.all(
@@ -436,14 +528,17 @@ export function registerHitchfinRoutes(
             }),
         )
       }
-      listingCache.set(key, { at: Date.now(), signature, probes })
+      if (generationOf(key) === generation && latestListingSignature.get(key) === signature) {
+        listingCache.set(key, { at: Date.now(), signature, generation, probes })
+      }
       return probes
     })()
-    listingInflight.set(key, task)
+    const entry: InflightEntry<Map<string, StateProbe>> = { signature, generation, promise }
+    listingInflight.set(key, entry)
     try {
-      return await task
+      return await promise
     } finally {
-      if (listingInflight.get(key) === task) listingInflight.delete(key)
+      if (listingInflight.get(key) === entry) listingInflight.delete(key)
     }
   }
 
@@ -455,22 +550,29 @@ export function registerHitchfinRoutes(
     const out = new Map<string, Record<string, unknown> | null>()
     if (!loadInfo) return out
     const signature = stateSignature(accountList)
+    const generation = generationOf(descriptor.id)
     await Promise.all(
       accountList
         .filter((account) => account.enabled !== false)
         .map(async (account) => {
           const key = `${descriptor.id}\0${account.accountId}`
+          latestQuotaSignature.set(key, signature)
           const cached = quotaCache.get(key)
-          if (cached && cached.signature === signature && Date.now() - cached.at < STATE_TTL_MS) {
+          if (
+            cached &&
+            cached.signature === signature &&
+            cached.generation === generation &&
+            Date.now() - cached.at < STATE_TTL_MS
+          ) {
             out.set(account.accountId, cached.value)
             return
           }
           const inflight = quotaInflight.get(key)
-          if (inflight) {
-            out.set(account.accountId, await inflight)
+          if (inflight && inflight.signature === signature && inflight.generation === generation) {
+            out.set(account.accountId, await inflight.promise)
             return
           }
-          const task = (async () => {
+          const promise = (async () => {
             let value: Record<string, unknown> | null = null
             try {
               value = (await worker.usage(probeOptions(loadInfo, account), 5_000)) as unknown as
@@ -479,14 +581,24 @@ export function registerHitchfinRoutes(
             } catch {
               value = null
             }
-            quotaCache.set(key, { at: Date.now(), signature, value })
+            if (
+              generationOf(descriptor.id) === generation &&
+              latestQuotaSignature.get(key) === signature
+            ) {
+              quotaCache.set(key, { at: Date.now(), signature, generation, value })
+            }
             return value
           })()
-          quotaInflight.set(key, task)
+          const entry: InflightEntry<Record<string, unknown> | null> = {
+            signature,
+            generation,
+            promise,
+          }
+          quotaInflight.set(key, entry)
           try {
-            out.set(account.accountId, await task)
+            out.set(account.accountId, await promise)
           } finally {
-            if (quotaInflight.get(key) === task) quotaInflight.delete(key)
+            if (quotaInflight.get(key) === entry) quotaInflight.delete(key)
           }
         }),
     )
@@ -494,9 +606,15 @@ export function registerHitchfinRoutes(
   }
 
   const modelsChanged = (descriptor: ChannelDescriptor): void => {
+    channelGenerations.set(descriptor.id, generationOf(descriptor.id) + 1)
     listingCache.delete(descriptor.id)
+    listingInflight.delete(descriptor.id)
+    const prefix = `${descriptor.id}\0`
     for (const key of quotaCache.keys()) {
-      if (key.startsWith(`${descriptor.id}\0`)) quotaCache.delete(key)
+      if (key.startsWith(prefix)) quotaCache.delete(key)
+    }
+    for (const key of quotaInflight.keys()) {
+      if (key.startsWith(prefix)) quotaInflight.delete(key)
     }
     adapter.invalidate(descriptor.providerId)
     ctx.emit?.('llm/models-updated', descriptor.providerId)
@@ -640,17 +758,49 @@ export function registerHitchfinRoutes(
             }
           }
 
+          const aliasesByName = new Map<string, Set<string>>()
+          const recordAlias = (model: Pick<ChannelModelRecord, 'id' | 'name'>) => {
+            const norm = normalizedModelName(model.name)
+            if (!norm) return
+            let set = aliasesByName.get(norm)
+            if (!set) {
+              set = new Set<string>()
+              aliasesByName.set(norm, set)
+            }
+            set.add(model.id)
+          }
+          for (const model of mergedAll.values()) recordAlias(model)
+          if (mergedAll.size > 0) {
+            lastRawModels.set(descriptor.id, mergedAll)
+          } else {
+            const priorRaw = lastRawModels.get(descriptor.id)
+            if (priorRaw) {
+              for (const model of priorRaw.values()) recordAlias(model)
+            }
+          }
+
           let models = dedupeModels([...mergedVisible.values()]).map((model) => ({
             id: model.id,
             name: model.name,
             free: model.free,
           }))
-          let allModels = dedupeModels([...mergedAll.values()]).map((model) => ({
-            id: model.id,
-            name: model.name,
-            free: model.free,
-            freeKnown: model.freeKnown,
-          }))
+          let allModels: Array<{
+            id: string
+            name: string
+            free: boolean
+            freeKnown: boolean
+            aliases?: string[]
+          }> = dedupeModels([...mergedAll.values()]).map((model) => {
+            const norm = normalizedModelName(model.name)
+            const aliases = [...(aliasesByName.get(norm) ?? [])].filter((id) => id !== model.id)
+            return {
+              id: model.id,
+              name: model.name,
+              free: model.free,
+              freeKnown: model.freeKnown,
+              ...(aliases.length > 0 ? { aliases } : {}),
+            }
+          })
           let freeStatusKnown = allModels.some((model) => model.freeKnown)
 
           if (views.length === 0) {
@@ -683,7 +833,17 @@ export function registerHitchfinRoutes(
                   name: model.name,
                   free: model.badge?.tone === 'success',
                 }))
-                allModels = models.map((model) => ({ ...model, freeKnown: false }))
+                allModels = models.map((model) => {
+                  const norm = normalizedModelName(model.name)
+                  const aliases = [...(aliasesByName.get(norm) ?? [])].filter(
+                    (id) => id !== model.id,
+                  )
+                  return {
+                    ...model,
+                    freeKnown: false,
+                    ...(aliases.length > 0 ? { aliases } : {}),
+                  }
+                })
                 freeStatusKnown = false
               }
             } catch {
@@ -696,8 +856,10 @@ export function registerHitchfinRoutes(
           // toggle (or the hidden intersection) for the enabled ones.
           const settingAccounts = accountList.filter((account) => account.enabled !== false)
           const channelAccounts = settingAccounts.length > 0 ? settingAccounts : accountList
+          const rawForHidden =
+            mergedAll.size > 0 ? mergedAll : (lastRawModels.get(descriptor.id) ?? mergedAll)
           const hiddenModels = canonicalHiddenNames(
-            mergedAll,
+            rawForHidden,
             channelAccounts.map((account) => account.hiddenModels ?? []),
           )
 
@@ -794,11 +956,22 @@ export function registerHitchfinRoutes(
         sendJson(res, 400, { ok: false, error: parsedProxy.error })
         return
       }
-      const accountId = await resolveAccountId(accounts, descriptor.id, requestedAccountId)
+      const reservation = await reserveAccountId(descriptor.id, requestedAccountId)
+      const accountId = reservation.accountId
       const existing = await accounts.get(descriptor.id, accountId).catch(() => undefined)
       const proxy = parsedProxy.proxy ?? existing?.proxy
       try {
         const started = await worker.authorize(loadInfo, accountId, methodIndex, inputs, proxy)
+        if (disposed) {
+          try {
+            worker.cancelAuth(started.session)
+          } catch {
+            // The worker may already be stopping.
+          }
+          reservation.release()
+          sendJson(res, 503, { ok: false, error: 'plugin is shutting down' })
+          return
+        }
         const autoOpened = Boolean(
           started.url &&
             authMethod.id === 'browser' &&
@@ -818,12 +991,13 @@ export function registerHitchfinRoutes(
           ...(proxy ? { proxy } : {}),
           createdAt: Date.now(),
         }
-        trackLogin(state)
+        trackLogin(state, reservation.release)
         if (state.status === 'pending') {
           void completeLogin(state, descriptor, loadInfo)
         }
         sendJson(res, 200, { ok: true, login: publicLogin(state) })
       } catch (error) {
+        reservation.release()
         sendJson(res, 500, { ok: false, error: errorMessage(error) })
       }
       return
@@ -872,12 +1046,16 @@ export function registerHitchfinRoutes(
         sendJson(res, 400, { ok: false, error: 'invalid accountId' })
         return
       }
+      const reservation = await reserveAccountId(descriptor.id, requestedAccountId)
       try {
-        const accountId = await resolveAccountId(accounts, descriptor.id, requestedAccountId)
-        const result = await worker.apiKey(loadInfo, accountId, methodIndex, key)
+        const result = await worker.apiKey(loadInfo, reservation.accountId, methodIndex, key)
+        if (disposed) {
+          sendJson(res, 503, { ok: false, error: 'plugin is shutting down' })
+          return
+        }
         const account = await saveLoginAccount(
           descriptor,
-          accountId,
+          reservation.accountId,
           result.auth,
           parsedProxy.proxy,
         )
@@ -886,6 +1064,8 @@ export function registerHitchfinRoutes(
         sendJson(res, 200, { ok: true, account: publicAccount(account) })
       } catch (error) {
         sendJson(res, 500, { ok: false, error: errorMessage(error) })
+      } finally {
+        reservation.release()
       }
       return
     }
@@ -938,6 +1118,7 @@ export function registerHitchfinRoutes(
           // The worker may already be stopping; the state still turns cancelled.
         }
         state.status = 'cancelled'
+        releaseLoginAccount(state.id)
       }
       sendJson(res, 200, { ok: true, login: publicLogin(state) })
       return
@@ -1090,16 +1271,18 @@ export function registerHitchfinRoutes(
         sendJson(res, 404, { ok: false, error: 'unknown channel' })
         return
       }
-      const hidden = Array.isArray(body.hiddenModels)
-        ? [
-            ...new Set(
-              body.hiddenModels
-                .filter((value): value is string => typeof value === 'string')
-                .map((value) => value.trim())
-                .filter(Boolean),
-            ),
-          ]
-        : []
+      if (!Array.isArray(body.hiddenModels)) {
+        sendJson(res, 400, { ok: false, error: 'hiddenModels must be an array' })
+        return
+      }
+      const hidden = [
+        ...new Set(
+          body.hiddenModels
+            .filter((value): value is string => typeof value === 'string')
+            .map((value) => value.trim())
+            .filter(Boolean),
+        ),
+      ]
       const accountId = text(body.accountId)
       if (accountId) {
         const account = await accounts.get(descriptor.id, accountId)
@@ -1151,17 +1334,22 @@ export function registerHitchfinRoutes(
     loadInfo: NonNullable<ReturnType<ChannelRegistry['loadInfo']>>,
     code?: string,
   ): Promise<void> {
-    if (isLoginCancelled(state)) return
+    if (disposed || isLoginCancelled(state)) {
+      releaseLoginAccount(state.id)
+      return
+    }
     try {
       const result = await worker.callback(loadInfo, state.workerSession, code, state.proxy)
-      // The user may have cancelled while the upstream callback was in flight.
-      if (isLoginCancelled(state)) return
+      // The user may have cancelled or disabled the plugin while the upstream
+      // callback was in flight.
+      if (disposed || isLoginCancelled(state)) return
       const account = await saveLoginAccount(
         descriptor,
         state.accountId,
         result.auth,
         state.proxy,
       )
+      if (disposed) return
       if (isLoginCancelled(state)) {
         // The credentials landed before the cancel arrived. Keep the account
         // usable, but do not report a sign-in the user cancelled.
@@ -1175,16 +1363,37 @@ export function registerHitchfinRoutes(
       state.status = 'ok'
       state.account = account
     } catch (error) {
-      if (isLoginCancelled(state)) return
+      if (disposed || isLoginCancelled(state)) return
       state.status = 'error'
       state.error = errorMessage(error)
+    } finally {
+      releaseLoginAccount(state.id)
     }
   }
 
   return () => {
+    disposed = true
     for (const timer of loginTimers) clearTimeout(timer)
     loginTimers.clear()
+    for (const state of logins.values()) {
+      if (state.status === 'pending' || state.status === 'code') {
+        state.status = 'cancelled'
+        try {
+          worker.cancelAuth(state.workerSession)
+        } catch {
+          // The worker may already be stopping.
+        }
+      }
+    }
+    for (const release of loginReleases.values()) release()
+    loginReleases.clear()
     logins.clear()
+    pendingAccountIds.clear()
+    listingCache.clear()
+    listingInflight.clear()
+    quotaCache.clear()
+    quotaInflight.clear()
+    lastRawModels.clear()
     if (typeof unregister === 'function') {
       try {
         unregister()

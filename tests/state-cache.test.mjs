@@ -198,3 +198,233 @@ test('a changed account signature invalidates the cached snapshot', async () => 
     h.cleanup()
   }
 })
+
+test('concurrent /state does not reuse an in-flight snapshot with an older signature', async () => {
+  let handler
+  let current = { ...account }
+  let releaseFirst
+  let callIndex = 0
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve
+  })
+  const cleanup = registerHitchfinRoutes(
+    {
+      webServer: {
+        register(route) {
+          handler = route.handler
+          return () => {}
+        },
+      },
+      logger: { info() {}, warn() {} },
+      emit() {},
+      get: () => undefined,
+    },
+    {
+      registry: { all: () => [descriptor], loadInfo: () => loadInfo },
+      accounts: {
+        get: async () => current,
+        list: async () => [current],
+        nextAccountId: async () => 'acct-2',
+        save: async (next) => {
+          current = next
+          return next
+        },
+      },
+      worker: {
+        listModels: async () => {
+          callIndex += 1
+          const id = callIndex
+          if (id === 1) {
+            await firstGate
+            return { models: [{ ...model, id: 'old-model', name: 'Old Model' }], liveFailed: false }
+          }
+          return { models: [{ ...model, id: 'new-model', name: 'New Model' }], liveFailed: false }
+        },
+        usage: async () => ({ windows: [] }),
+      },
+      adapter: {
+        invalidate() {},
+        forget() {},
+        listModels: async () => [],
+        accountStatus: () => ({}),
+        cachedModels: () => [],
+      },
+    },
+  )
+  const getState = () =>
+    new Promise((resolve) => {
+      const res = makeRes()
+      handler(makeReq('GET', `${PREFIX}/state?quota=0`), res)
+      const poll = () => {
+        if (res.body) resolve({ status: res.statusCode, body: JSON.parse(res.body) })
+        else setTimeout(poll, 5)
+      }
+      poll()
+    })
+  try {
+    const firstPromise = getState()
+    await new Promise((resolve) => setTimeout(resolve, 15))
+    current = { ...current, proxy: 'http://127.0.0.1:7890', updatedAt: 42 }
+    const second = await getState()
+    assert.deepEqual(
+      second.body.channels[0].models.map((m) => m.id),
+      ['new-model'],
+    )
+    releaseFirst()
+    const first = await firstPromise
+    assert.deepEqual(
+      first.body.channels[0].models.map((m) => m.id),
+      ['old-model'],
+    )
+    const third = await getState()
+    assert.deepEqual(
+      third.body.channels[0].models.map((m) => m.id),
+      ['new-model'],
+    )
+    assert.equal(callIndex, 2)
+  } finally {
+    releaseFirst()
+    cleanup()
+  }
+})
+
+test('invalidating a channel prevents a stale in-flight /state from poisoning cache', async () => {
+  let handler
+  let releaseFirst
+  let callIndex = 0
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve
+  })
+  const cleanup = registerHitchfinRoutes(
+    {
+      webServer: {
+        register(route) {
+          handler = route.handler
+          return () => {}
+        },
+      },
+      logger: { info() {}, warn() {} },
+      emit() {},
+      get: () => undefined,
+    },
+    {
+      registry: { all: () => [descriptor], loadInfo: () => loadInfo },
+      accounts: {
+        get: async () => account,
+        list: async () => [account],
+        nextAccountId: async () => 'acct-2',
+        save: async (next) => next,
+      },
+      worker: {
+        reloadChannel: async () => {},
+        listModels: async () => {
+          callIndex += 1
+          if (callIndex === 1) {
+            await firstGate
+            return { models: [{ ...model, id: 'stale-model', name: 'Stale Model' }], liveFailed: false }
+          }
+          return { models: [{ ...model, id: 'fresh-model', name: 'Fresh Model' }], liveFailed: false }
+        },
+        usage: async () => ({ windows: [] }),
+      },
+      adapter: {
+        invalidate() {},
+        forget() {},
+        listModels: async () => [],
+        accountStatus: () => ({}),
+        cachedModels: () => [],
+      },
+    },
+  )
+  const reqJson = (method, path, body) =>
+    new Promise((resolve) => {
+      const res = makeRes()
+      handler(makeReq(method, path, body), res)
+      const poll = () => {
+        if (res.body) resolve({ status: res.statusCode, body: JSON.parse(res.body) })
+        else setTimeout(poll, 5)
+      }
+      poll()
+    })
+  try {
+    const stalePromise = reqJson('GET', `${PREFIX}/state?quota=0`)
+    await new Promise((resolve) => setTimeout(resolve, 15))
+    const refreshed = await reqJson('POST', `${PREFIX}/models/refresh`, {
+      channelId: descriptor.id,
+    })
+    assert.equal(refreshed.status, 200)
+    releaseFirst()
+    await stalePromise
+    const fresh = await reqJson('GET', `${PREFIX}/state?quota=0`)
+    assert.deepEqual(
+      fresh.body.channels[0].models.map((m) => m.id),
+      ['fresh-model'],
+    )
+    assert.equal(callIndex, 2)
+  } finally {
+    releaseFirst()
+    cleanup()
+  }
+})
+
+test('/state includes legacy alias ids in allModels for canonical deduplicated models', async () => {
+  let handler
+  const cleanup = registerHitchfinRoutes(
+    {
+      webServer: {
+        register(route) {
+          handler = route.handler
+          return () => {}
+        },
+      },
+      logger: { info() {}, warn() {} },
+      emit() {},
+      get: () => undefined,
+    },
+    {
+      registry: { all: () => [descriptor], loadInfo: () => loadInfo },
+      accounts: {
+        get: async () => account,
+        list: async () => [account],
+        nextAccountId: async () => 'acct-2',
+        save: async (next) => next,
+      },
+      worker: {
+        listModels: async () => ({
+          models: [
+            { ...model, id: 'deepseek-v4.1-flash_advisor_', name: 'DeepSeek V4.1 Flash' },
+            { ...model, id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' },
+          ],
+          liveFailed: false,
+        }),
+        usage: async () => ({ windows: [] }),
+      },
+      adapter: {
+        invalidate() {},
+        forget() {},
+        listModels: async () => [],
+        accountStatus: () => ({}),
+        cachedModels: () => [],
+      },
+    },
+  )
+  try {
+    const res = makeRes()
+    handler(makeReq('GET', `${PREFIX}/state?quota=0`), res)
+    for (let i = 0; i < 100 && !res.body; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    const body = JSON.parse(res.body)
+    assert.deepEqual(body.channels[0].allModels, [
+      {
+        id: 'deepseek-v4.1-flash',
+        name: 'DeepSeek V4.1 Flash',
+        free: true,
+        freeKnown: true,
+        aliases: ['deepseek-v4.1-flash_advisor_'],
+      },
+    ])
+  } finally {
+    cleanup()
+  }
+})

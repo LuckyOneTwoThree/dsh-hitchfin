@@ -498,31 +498,38 @@ function normalizeAuth(result) {
 
 async function handleCallback(message) {
   const session = authSessions.get(message.session)
-  if (!session) throw new Error('no such sign-in session')
-  authSessions.delete(message.session)
+  if (!session || session.claimed) throw new Error('no such sign-in session')
+  session.claimed = true
   clearTimeout(session.timer)
-  const dispatcher = await dispatcherFor(session.proxy)
+  try {
+    const dispatcher = await dispatcherFor(session.proxy)
+    if (session.controller.signal.aborted) throw new Error('sign-in cancelled')
 
-  const result = await scope.run(
-    {
-      channelId: session.channelId,
-      accountId: session.accountId,
-      auth: undefined,
-      ...(dispatcher ? { dispatcher } : {}),
-    },
-    () =>
-      session.callback(
-        session.method === 'code' ? message.code ?? '' : undefined,
-        { signal: session.controller.signal },
-      ),
-  )
+    const result = await scope.run(
+      {
+        channelId: session.channelId,
+        accountId: session.accountId,
+        auth: undefined,
+        ...(dispatcher ? { dispatcher } : {}),
+      },
+      () =>
+        session.callback(
+          session.method === 'code' ? message.code ?? '' : undefined,
+          { signal: session.controller.signal },
+        ),
+    )
 
-  if (!result || result.type !== 'success') {
-    throw new Error(typeof result?.error === 'string' ? result.error : 'sign-in failed')
-  }
-  return {
-    provider: typeof result.provider === 'string' ? result.provider : session.provider,
-    auth: normalizeAuth(result),
+    if (!result || result.type !== 'success') {
+      throw new Error(typeof result?.error === 'string' ? result.error : 'sign-in failed')
+    }
+    return {
+      provider: typeof result.provider === 'string' ? result.provider : session.provider,
+      auth: normalizeAuth(result),
+    }
+  } finally {
+    if (authSessions.get(message.session) === session) {
+      authSessions.delete(message.session)
+    }
   }
 }
 

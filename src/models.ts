@@ -183,39 +183,65 @@ export function canonicalHiddenNames(
 export interface ModelToken {
   id: string
   name: string
+  /** Optional raw alias ids belonging to the same display model. */
+  aliases?: readonly string[]
+}
+
+function collectAliasTokens(
+  models: readonly ModelToken[],
+  raw?: readonly Pick<NamedModel, 'id' | 'name'>[],
+): { ids: Set<string>; names: Set<string>; loose: Set<string> } {
+  const ids = new Set<string>()
+  const names = new Set<string>()
+  const loose = new Set<string>()
+  for (const model of models) {
+    ids.add(model.id)
+    for (const alias of model.aliases ?? []) ids.add(alias)
+    const normalized = normalizedModelName(model.name)
+    if (normalized) names.add(normalized)
+    // Empty loose keys are not identities: without this filter, showing one
+    // non-ASCII model would also clear every other non-ASCII model token.
+    const looseKey = looseModelKey(normalized)
+    if (looseKey.length > 0) loose.add(looseKey)
+  }
+  if (raw) {
+    for (const entry of raw) {
+      const normalized = normalizedModelName(entry.name)
+      const looseKey = looseModelKey(normalized)
+      if (names.has(normalized) || (looseKey.length > 0 && loose.has(looseKey))) {
+        ids.add(entry.id)
+      }
+    }
+  }
+  return { ids, names, loose }
 }
 
 /**
  * Remove every stored spelling of one model from a hidden-token list.
  *
- * A fully non-ASCII model name has an empty loose key. Matching on that would
- * make every such name identical, so the loose comparison only applies when
- * the key is non-empty — the same guard `bulkHiddenTokens` uses.
+ * When `raw` (or `model.aliases`) is supplied, every legacy alias id that
+ * shares the model's canonical name is removed alongside the current id and
+ * loose spellings.
  */
 export function unhideModelTokens(
   hidden: readonly string[],
   model: ModelToken,
+  raw?: readonly Pick<NamedModel, 'id' | 'name'>[],
 ): string[] {
-  const key = normalizedModelName(model.name)
-  const loose = looseModelKey(key)
-  return hidden.filter(
-    (token) =>
-      token !== key &&
-      token !== model.id &&
-      !(loose.length > 0 && looseModelKey(token) === loose),
-  )
+  return bulkHiddenTokens([model], hidden, 'show', raw)
 }
 
 /**
  * Show or hide a set of models in one settings write. Hiding stores both the
  * canonical name and the id, so a vendor rename cannot bring a model back;
- * showing removes every spelling of those tokens (name, id and loose variants)
- * while leaving tokens for models outside the set untouched.
+ * showing removes every spelling of those tokens (name, id, aliases and loose
+ * variants) while leaving tokens for models outside the set untouched.
  */
 export function bulkHiddenTokens(
   models: readonly ModelToken[],
   hidden: readonly string[],
   action: 'show' | 'hide',
+  raw?: readonly Pick<NamedModel, 'id' | 'name'>[],
 ): string[] {
   if (action === 'hide') {
     return [
@@ -225,15 +251,10 @@ export function bulkHiddenTokens(
       ]),
     ]
   }
-  const ids = new Set(models.map((model) => model.id))
-  const names = new Set(models.map((model) => normalizedModelName(model.name)))
-  // Empty loose keys are not identities: without this filter, showing one
-  // Chinese-named model would also clear every other Chinese-named token.
-  const loose = new Set(
-    models.map((model) => looseModelKey(model.name)).filter((key) => key.length > 0),
-  )
+  const { ids, names, loose } = collectAliasTokens(models, raw)
   return hidden.filter((token) => {
-    const key = looseModelKey(token)
-    return !ids.has(token) && !names.has(token) && !(key.length > 0 && loose.has(key))
+    const normalized = normalizedModelName(token)
+    const key = looseModelKey(normalized)
+    return !ids.has(token) && !names.has(normalized) && !(key.length > 0 && loose.has(key))
   })
 }

@@ -211,11 +211,18 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
   private readonly lastUsed = new Map<string, number>()
   /** providers whose last model listing had a partial account failure. */
   private readonly incompleteProviders = new Set<string>()
+  private globalGeneration = 0
+  private readonly providerGenerations = new Map<string, number>()
 
   constructor(private readonly options: HitchfinAdapterOptions) {}
 
+  private generationFor(provider: string): number {
+    return this.globalGeneration + (this.providerGenerations.get(provider) ?? 0)
+  }
+
   invalidate(provider?: string): void {
     if (provider) {
+      this.providerGenerations.set(provider, (this.providerGenerations.get(provider) ?? 0) + 1)
       this.cache.delete(provider)
       this.inflightListings.delete(provider)
       this.incompleteProviders.delete(provider)
@@ -233,6 +240,8 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
         if (key.startsWith(prefix)) this.accountModels.delete(key)
       }
     } else {
+      this.globalGeneration += 1
+      this.providerGenerations.clear()
       this.cache.clear()
       this.lastGoodModels.clear()
       this.inflightListings.clear()
@@ -471,6 +480,7 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       return []
     }
 
+    const generation = this.generationFor(provider)
     try {
       const accounts = sortAccountsByPriority(await this.options.accounts.list(descriptor.id))
       // A disabled account keeps its credentials, proxy and visibility
@@ -564,6 +574,13 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
         }
       }
 
+      const models = dedupeModels([...byId.values()]).map((record) =>
+        modelInfo(descriptor, record, this.imagesAvailable()),
+      )
+      if (this.generationFor(provider) !== generation) {
+        return models
+      }
+
       const ownerPrefix = `${provider}\0`
       for (const map of [this.modelAccounts, this.accountModels]) {
         for (const key of map.keys()) {
@@ -588,10 +605,6 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       for (const [id, record] of byId) {
         this.protocols.set(`${provider}\0${id}`, selectTransportProtocol(descriptor, record))
       }
-
-      const models = dedupeModels([...byId.values()]).map((record) =>
-        modelInfo(descriptor, record, this.imagesAvailable()),
-      )
       if (allAccountsListed) {
         this.incompleteProviders.delete(provider)
         this.incompleteAttempts.delete(provider)
@@ -670,6 +683,16 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     if (options.provider === SPIKE_PROVIDER) {
       yield* this.streamSpike(options)
+      return
+    }
+    if (options.signal?.aborted) {
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'aborted',
+          failure: { message: 'request aborted', code: 'ABORTED' },
+        },
+      }
       return
     }
 

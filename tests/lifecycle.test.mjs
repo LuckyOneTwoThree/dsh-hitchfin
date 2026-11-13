@@ -426,3 +426,145 @@ test('a worker crash after response headers errors the active ReadableStream ins
     await host.stop()
   }
 })
+
+test('native authorization run(session) commits before saving, cancels on abort, and leaves no orphan on commit error', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-hitchfin-native-auth-'))
+  const pkgPath = join(dir, 'mock-channel.mjs')
+  writeFileSync(
+    pkgPath,
+    `export async function WorkBuddyAuthPlugin() {
+  return {
+    auth: {
+      provider: 'workbuddy',
+      methods: [
+        {
+          type: 'oauth',
+          label: 'Code',
+          authorize: async () => ({
+            method: 'code',
+            url: 'https://example.test/login',
+            instructions: 'Enter code',
+            callback: async (code, opts) => {
+              if (code === 'hang') {
+                return await new Promise((resolve, reject) => {
+                  if (opts?.signal?.aborted) {
+                    reject(new Error('aborted'))
+                    return
+                  }
+                  opts?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+                })
+              }
+              return { type: 'success', access: 'tok-' + String(code) }
+            },
+          }),
+        },
+      ],
+    },
+  }
+}
+`,
+  )
+
+  const records = new Map()
+  const events = []
+  const flows = []
+  let teardown
+  const ctx = {
+    llm: { registerAdapter() {} },
+    logger: { info() {}, warn() {} },
+    credentials: {
+      listRecords: async () => [...records.keys()].map((key) => ({ key })),
+      readRecord: async (key) => records.get(key),
+      modifyRecord: async (key, mutate) => {
+        events.push(`save:${key}`)
+        const next = await mutate(records.get(key))
+        if (next !== undefined) records.set(key, next)
+        return next
+      },
+      deleteRecord: async (key) => {
+        records.delete(key)
+      },
+    },
+    authorization: {
+      registerFlow(flow) {
+        flows.push(flow)
+        return () => {}
+      },
+    },
+    effect(setup) {
+      teardown = setup()
+      return () => {}
+    },
+    emit(event, payload) {
+      events.push(`emit:${event}:${payload}`)
+    },
+    get() {},
+  }
+
+  apply(ctx, { channelPackages: { 'workbuddy-cn': pkgPath } })
+  const flow = flows.find((entry) => entry.key.includes('workbuddy-cn'))
+  assert.ok(flow)
+
+  try {
+    // 1. Happy path: commit runs before save, auth payload is normalized, update event fires.
+    let committed
+    const controller1 = new AbortController()
+    await flow.run({
+      signal: controller1.signal,
+      notify() {},
+      prompt: async () => 'ok123',
+      commit: async (entry) => {
+        events.push(`commit:${entry.kind}`)
+        committed = entry
+      },
+    })
+    assert.deepEqual(events.slice(0, 3), [
+      'commit:grant',
+      `save:${flow.key}`,
+      'emit:llm/models-updated:hitchfin-workbuddy-cn',
+    ])
+    assert.equal(committed.kind, 'grant')
+    assert.equal(committed.payload.accountId, 'native-1')
+    assert.equal(committed.payload.auth.type, 'oauth')
+    assert.equal(committed.payload.auth.access, 'tok-ok123')
+    assert.equal(records.get(flow.key).payload.auth.access, 'tok-ok123')
+
+    // 2. Rejected session.commit does not overwrite credentials or emit update.
+    records.delete(flow.key)
+    events.length = 0
+    const controller2 = new AbortController()
+    await assert.rejects(
+      () =>
+        flow.run({
+          signal: controller2.signal,
+          notify() {},
+          prompt: async () => 'ok456',
+          commit: async () => {
+            throw new Error('commit refused')
+          },
+        }),
+      /commit refused/,
+    )
+    assert.equal(records.has(flow.key), false)
+    assert.equal(events.length, 0)
+
+    // 3. Aborting during an active callback cancels the real worker session cleanly.
+    const controller3 = new AbortController()
+    const running = flow.run({
+      signal: controller3.signal,
+      notify() {},
+      prompt: async () => {
+        setTimeout(() => controller3.abort(), 30)
+        return 'hang'
+      },
+      commit: async () => {
+        throw new Error('should not commit')
+      },
+    })
+    await assert.rejects(() => running)
+    assert.equal(records.has(flow.key), false)
+  } finally {
+    teardown?.()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
