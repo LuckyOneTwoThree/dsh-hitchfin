@@ -229,6 +229,7 @@ function makeServices(worker, adapterExtra = {}) {
   return {
     registry: {
       all: () => [descriptor],
+      invalidatePackageCache() {},
       loadInfo: () => ({
         channelId: descriptor.id,
         packagePath: FIXTURE,

@@ -149,7 +149,7 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
     ...(devSpike ? [SPIKE_PROVIDER] : []),
     ...registry.providerIds(),
   ]
-  ctx.llm.registerAdapter(providers, adapter)
+  const adapterRegistration = ctx.llm.registerAdapter(providers, adapter)
   ctx.logger.info(
     `dsh-hitchfin: registered ${providers.length} providers (${providers.join(', ')})`,
   )
@@ -195,6 +195,17 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
   // worker thread and leave the settings route registered across a reload.
   const disposePlugin = (): void => {
     disposed = true
+    // If the host hands back a disposer, run it: a reload must not leave the
+    // old adapter pointing at the stopped worker. Hosts that track the
+    // registration through the fiber dispose it themselves; disposers are
+    // idempotent there.
+    if (typeof adapterRegistration === 'function') {
+      try {
+        ;(adapterRegistration as () => void)()
+      } catch {
+        // The host may already be tearing down its services.
+      }
+    }
     for (const cleanup of cleanups) {
       try {
         cleanup()
@@ -250,7 +261,7 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
             )
           }
 
-          const existing = await accounts.get(descriptor.id, accountId).catch(() => undefined)
+          let existing = await accounts.get(descriptor.id, accountId).catch(() => undefined)
           if (disposed || session.signal.aborted) {
             throw new Error('sign-in cancelled')
           }
@@ -293,6 +304,13 @@ export function apply(ctx: HitchfinContext, config: HitchfinConfig = {}): void {
               }
             }
 
+            // The browser sign-in may have been open for minutes; the user can
+            // have edited the account (e.g. its proxy) since the snapshot above.
+            existing =
+              (await accounts.get(descriptor.id, accountId).catch(() => undefined)) ?? existing
+            if (disposed || session.signal.aborted) {
+              throw new Error('sign-in cancelled')
+            }
             const result = await worker.callback(loadInfo, started.session, code, existing?.proxy)
             if (disposed || session.signal.aborted) {
               throw new Error('sign-in cancelled')

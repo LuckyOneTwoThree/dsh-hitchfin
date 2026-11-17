@@ -189,6 +189,11 @@ export class ChannelRegistry {
     return info
   }
 
+  /** A package installed mid-session must become visible without a restart. */
+  invalidatePackageCache(): void {
+    this.packageCache.clear()
+  }
+
   private resolvePackageInfo(descriptor: ChannelDescriptor): ChannelPackageInfo | undefined {
     const override = this.overrides[descriptor.id]
     const installed = override ?? resolveInstalled(descriptor.packageName)

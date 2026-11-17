@@ -308,7 +308,11 @@ test('invalidating a channel prevents a stale in-flight /state from poisoning ca
       get: () => undefined,
     },
     {
-      registry: { all: () => [descriptor], loadInfo: () => loadInfo },
+      registry: {
+        all: () => [descriptor],
+        loadInfo: () => loadInfo,
+        invalidatePackageCache() {},
+      },
       accounts: {
         get: async () => account,
         list: async () => [account],

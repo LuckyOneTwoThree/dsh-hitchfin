@@ -49,6 +49,27 @@ function normalizeProxy(value) {
 }
 
 const MAX_PROXY_AGENTS = 8
+const proxyAgentRefs = new Map()
+
+function retainDispatcher(dispatcher) {
+  if (!dispatcher) return () => {}
+  proxyAgentRefs.set(dispatcher, (proxyAgentRefs.get(dispatcher) ?? 0) + 1)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const left = (proxyAgentRefs.get(dispatcher) ?? 1) - 1
+    if (left <= 0) proxyAgentRefs.delete(dispatcher)
+    else proxyAgentRefs.set(dispatcher, left)
+  }
+}
+
+// scope.run with a reference count on the dispatcher, so eviction never
+// closes a ProxyAgent an in-flight operation still fetches through.
+function runScoped(store, fn) {
+  const release = retainDispatcher(store.dispatcher)
+  return Promise.resolve(scope.run(store, fn)).finally(release)
+}
 
 async function dispatcherFor(proxy) {
   const normalized = normalizeProxy(proxy)
@@ -62,12 +83,14 @@ async function dispatcherFor(proxy) {
   const agent = new module.ProxyAgent(normalized)
   proxyAgents.set(normalized, agent)
   if (proxyAgents.size > MAX_PROXY_AGENTS) {
-    const oldest = proxyAgents.keys().next().value
-    if (oldest !== undefined && oldest !== normalized) {
-      const stale = proxyAgents.get(oldest)
-      proxyAgents.delete(oldest)
+    for (const key of proxyAgents.keys()) {
+      if (key === normalized) continue
+      const stale = proxyAgents.get(key)
+      if ((proxyAgentRefs.get(stale) ?? 0) > 0) continue
+      proxyAgents.delete(key)
       // A ProxyAgent owns a socket pool; dropping the reference alone leaks it.
       Promise.resolve(stale?.close?.()).catch(() => {})
+      break
     }
   }
   return agent
@@ -89,6 +112,11 @@ globalThis.fetch = async function hitchfinFetch(input, init) {
       options.body = await request.clone().arrayBuffer()
     }
   }
+  // A Request carries its own abort signal; dropping it made proxied calls
+  // uncancellable when the package passed a Request instead of init.signal.
+  const signals = [init?.signal, request?.signal].filter((s) => s instanceof AbortSignal)
+  if (signals.length === 1) options.signal = signals[0]
+  else if (signals.length > 1) options.signal = AbortSignal.any(signals)
   return module.fetch(request ? request.url : String(input), options)
 }
 
@@ -290,7 +318,7 @@ async function handleModels(message) {
   const loaded = await loadChannel(message.channel)
   const dispatcher = await dispatcherFor(message.proxy)
   const freeOnly = Boolean(message.freeOnly)
-  const base = markFallbackCatalog(await scope.run(
+  const base = markFallbackCatalog(await runScoped(
     {
       channelId: message.channel.channelId,
       accountId: message.accountId,
@@ -306,7 +334,7 @@ async function handleModels(message) {
   if (message.auth && typeof loaded.hooks?.provider?.models === 'function') {
     const auth = message.auth
     try {
-      const live = await scope.run(
+      const live = await runScoped(
         {
           channelId: message.channel.channelId,
           accountId: message.accountId,
@@ -387,6 +415,38 @@ async function handleApiKey(message) {
   }
 }
 
+const USAGE_WINDOW_STRING_FIELDS = ['name', 'unit', 'display', 'resetsAt']
+const USAGE_WINDOW_NUMBER_FIELDS = ['used', 'amount', 'limit']
+
+// The usage hook belongs to the channel package; only the fields the settings
+// UI actually reads may cross into /state, so a package cannot smuggle
+// arbitrary (possibly sensitive) payload into the host response.
+function sanitizeUsage(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return {}
+  const out = {}
+  for (const field of ['plan', 'signIn', 'error']) {
+    if (typeof usage[field] === 'string') out[field] = usage[field]
+  }
+  if (Array.isArray(usage.windows)) {
+    out.windows = usage.windows
+      .filter((window) => window && typeof window === 'object' && !Array.isArray(window))
+      .map((window) => {
+        const clean = {}
+        for (const field of USAGE_WINDOW_STRING_FIELDS) {
+          if (typeof window[field] === 'string') clean[field] = window[field]
+        }
+        for (const field of USAGE_WINDOW_NUMBER_FIELDS) {
+          if (typeof window[field] === 'number' && Number.isFinite(window[field])) {
+            clean[field] = window[field]
+          }
+        }
+        if (typeof window.free === 'boolean') clean.free = window.free
+        return clean
+      })
+  }
+  return out
+}
+
 async function handleUsage(message) {
   const loaded = await loadChannel(message.channel)
   if (typeof loaded.hooks?.auth?.usage !== 'function') {
@@ -395,7 +455,7 @@ async function handleUsage(message) {
   const auth = message.auth
   if (!auth) return { usage: { error: 'not signed in' } }
   const dispatcher = await dispatcherFor(message.proxy)
-  const usage = await scope.run(
+  const usage = await runScoped(
     {
       channelId: message.channel.channelId,
       accountId: message.accountId,
@@ -404,7 +464,7 @@ async function handleUsage(message) {
     },
     () => loaded.hooks.auth.usage(getAuth, loaded.provider),
   )
-  return { usage: usage ?? {} }
+  return { usage: sanitizeUsage(usage) }
 }
 
 async function handleAuthorize(message) {
@@ -421,7 +481,7 @@ async function handleAuthorize(message) {
   const inputs =
     message.inputs ??
     (Array.isArray(method.prompts) && method.prompts.length > 0 ? {} : undefined)
-  const started = await scope.run(
+  const started = await runScoped(
     {
       channelId: message.channel.channelId,
       accountId: message.accountId,
@@ -505,7 +565,7 @@ async function handleCallback(message) {
     const dispatcher = await dispatcherFor(session.proxy)
     if (session.controller.signal.aborted) throw new Error('sign-in cancelled')
 
-    const result = await scope.run(
+    const result = await runScoped(
       {
         channelId: session.channelId,
         accountId: session.accountId,
@@ -555,7 +615,7 @@ async function handleFetch(message) {
     // controller in `streams` for the rest of the worker's life.
     streams.set(message.id, controller)
     const dispatcher = await dispatcherFor(message.proxy)
-    await scope.run(
+    await runScoped(
       {
         channelId: message.channel.channelId,
         accountId: message.accountId,

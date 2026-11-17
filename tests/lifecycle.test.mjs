@@ -568,3 +568,46 @@ test('native authorization run(session) commits before saving, cancels on abort,
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a duplicate head message does not orphan the first response body', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'hitchfin-dup-head-'))
+  const workerPath = join(directory, 'worker.mjs')
+  writeFileSync(
+    workerPath,
+    `import { parentPort } from 'node:worker_threads'
+parentPort.on('message', (message) => {
+  if (message.type === 'fetch') {
+    const head = { id: message.id, type: 'head', status: 200, headers: { 'content-type': 'text/event-stream' } }
+    parentPort.postMessage(head)
+    // A buggy package sends the head twice; the first body must survive.
+    parentPort.postMessage(head)
+    parentPort.postMessage({ id: message.id, type: 'chunk', data: Buffer.from('data: ok\\n\\n').toString('base64') })
+    parentPort.postMessage({ id: message.id, type: 'end' })
+    return
+  }
+  if (message.type === 'cancelFetch' || message.type === 'cancelAuth') return
+  parentPort.postMessage({ id: message.id, ok: true, result: {} })
+})
+`,
+  )
+  const host = new ChannelWorkerHost({ workerPath: pathToFileURL(workerPath) })
+  try {
+    const response = await host.fetch(
+      'http://hitchfin.local/v1/chat/completions',
+      { method: 'POST', body: '{}' },
+      { channel },
+    )
+    const reader = response.body.getReader()
+    const chunks = []
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(Buffer.from(value).toString('utf8'))
+    }
+    assert.equal(chunks.join(''), 'data: ok\n\n')
+  } finally {
+    await host.stop()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

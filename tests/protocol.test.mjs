@@ -780,3 +780,184 @@ test('a generic trailing error object still lets streamed content finish', async
   assert.equal(chunks.at(-1).type, 'finish')
   assert.equal(chunks.at(-1).reason.kind, 'stop')
 })
+
+// ---------------------------------------------------------------------------
+// SSE framing edge cases (shared ssePayloads)
+
+test('multi-line data fields join into one event', async () => {
+  const transport = createOpenAiSseTransport(
+    fetchWith(
+      responseFrom([
+        'data: {"choices":[{"delta":\ndata: {"content":"hi"}}]}\n\n',
+        'data: [DONE]\n\n',
+      ]),
+    ),
+  )
+  const chunks = await collect(transport(params()))
+  const text = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('')
+  assert.equal(text, 'hi')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
+
+test('CR-only line endings still frame events', async () => {
+  const transport = createOpenAiSseTransport(
+    fetchWith(
+      responseFrom([
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\r\r',
+        'data: [DONE]\r\r',
+      ]),
+    ),
+  )
+  const chunks = await collect(transport(params()))
+  const text = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('')
+  assert.equal(text, 'hi')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
+
+test('a CRLF split across chunks does not become a spurious blank line', async () => {
+  const transport = createOpenAiSseTransport(
+    fetchWith(
+      responseFrom([
+        'data: {"choices":[{"delta":\r',
+        '\ndata: {"content":"hi"}}]}\r\n\r\n',
+        'data: [DONE]\r\n',
+      ]),
+    ),
+  )
+  const chunks = await collect(transport(params()))
+  const text = chunks.filter((c) => c.type === 'text-delta').map((c) => c.text).join('')
+  assert.equal(text, 'hi')
+})
+
+test('an unterminated giant SSE line fails instead of growing without bound', async () => {
+  const transport = createOpenAiSseTransport(
+    fetchWith(responseFrom(['data: ' + 'x'.repeat(9 * 1024 * 1024)])),
+  )
+  await assert.rejects(
+    collect(transport(params())),
+    (error) => error.code === 'TRANSPORT',
+  )
+})
+
+test('tool_calls without index keep parallel calls in separate slots', async () => {
+  const transport = createOpenAiSseTransport(
+    fetchWith(
+      responseFrom([
+        oai({ choices: [{ delta: { tool_calls: [{ id: 'a', function: { name: 'f1', arguments: '{"x":' } }] } }] }),
+        oai({ choices: [{ delta: { tool_calls: [{ id: 'b', function: { name: 'f2', arguments: '{"y":' } }] } }] }),
+        oai({ choices: [{ delta: { tool_calls: [{ id: 'a', function: { arguments: '1}' } }] } }] }),
+        oai({ choices: [{ delta: { tool_calls: [{ id: 'b', function: { arguments: '2}' } }] } }] }),
+        oai({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] }),
+        oai('[DONE]'),
+      ]),
+    ),
+  )
+  const chunks = await collect(transport(params()))
+  const ends = chunks.filter((c) => c.type === 'block-end' && c.block.type === 'tool-call')
+  assert.equal(ends.length, 2)
+  const byName = Object.fromEntries(ends.map((c) => [c.block.name, c.block.arguments]))
+  assert.equal(byName.f1, '{"x":1}')
+  assert.equal(byName.f2, '{"y":2}')
+  assert.equal(chunks.at(-1).reason.kind, 'tool-calls')
+})
+
+test('a stringified HTTP error code still classifies the failure', async () => {
+  const transport = createOpenAiSseTransport(
+    fetchWith(responseFrom([oai({ error: { code: '429', message: 'slow down' } })])),
+  )
+  await assert.rejects(
+    collect(transport(params())),
+    (error) => error.code === 'RATE_LIMIT',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Anthropic finish reason and trailing errors
+
+test('max_tokens truncation inside a tool_use block stays max-tokens', async () => {
+  const transport = createAnthropicSseTransport(
+    fetchWith(
+      responseFrom([
+        ev('message_start', { type: 'message_start', message: { usage: { input_tokens: 5 } } }),
+        ev('content_block_start', {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'toolu_1', name: 'search', input: {} },
+        }),
+        ev('content_block_delta', {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partial_json: '{"q":' },
+        }),
+        // Truncated: no content_block_stop before the stop reason arrives.
+        ev('message_delta', {
+          type: 'message_delta',
+          delta: { stop_reason: 'max_tokens' },
+          usage: { output_tokens: 9 },
+        }),
+        ev('message_stop', { type: 'message_stop' }),
+      ]),
+    ),
+  )
+  const chunks = await collect(transport(params()))
+  assert.equal(chunks.at(-1).type, 'finish')
+  assert.equal(chunks.at(-1).reason.kind, 'max-tokens')
+  const end = chunks.find((c) => c.type === 'block-end' && c.block.type === 'tool-call')
+  assert.equal(end.block.arguments, '{"q":')
+})
+
+test('a generic Anthropic error after a complete answer does not fail the turn', async () => {
+  const transport = createAnthropicSseTransport(
+    fetchWith(
+      responseFrom([
+        ev('content_block_start', {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        }),
+        ev('content_block_delta', {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'done' },
+        }),
+        ev('content_block_stop', { type: 'content_block_stop', index: 0 }),
+        ev('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' } }),
+        ev('error', { type: 'error', error: { type: 'api_error', message: 'vendor hiccup' } }),
+        ev('message_stop', { type: 'message_stop' }),
+      ]),
+    ),
+  )
+  const chunks = await collect(transport(params()))
+  assert.equal(chunks.at(-1).type, 'finish')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
+
+test('an account-scoped Anthropic error after content still fails the turn', async () => {
+  const transport = createAnthropicSseTransport(
+    fetchWith(
+      responseFrom([
+        ev('content_block_start', {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: 'partial' },
+        }),
+        ev('error', { type: 'error', error: { type: 'rate_limit_error', message: 'throttled' } }),
+      ]),
+    ),
+  )
+  await assert.rejects(
+    collect(transport(params())),
+    (error) => error.code === 'RATE_LIMIT',
+  )
+})
+
+test('redactError strips bare JWTs and proxy userinfo', async () => {
+  const { redactError } = await import('../worker/channel-contract.mjs')
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0PTHs'
+  assert.equal(redactError(`upstream said ${jwt}`), 'upstream said [redacted]')
+  assert.equal(
+    redactError('connect failed via http://user:secretpass@proxy.internal:8080'),
+    'connect failed via http://[redacted]@proxy.internal:8080',
+  )
+  assert.equal(redactError('Bearer abc.def.ghi'), 'Bearer [redacted]')
+})

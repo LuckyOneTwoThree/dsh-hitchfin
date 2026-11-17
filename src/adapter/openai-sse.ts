@@ -1,4 +1,5 @@
 import { HitchfinError } from '../errors.js'
+import { ssePayloads } from './protocol.js'
 import type {
   GenerateOptions,
   RequestContentBlock,
@@ -277,7 +278,9 @@ export function createOpenAiSseTransport(
           }
         }
       } catch {
-        // The body is diagnostic only.
+        // The body is diagnostic only; drop it so the worker-side stream does
+        // not linger until the idle watchdog fires.
+        void response.body?.cancel().catch(() => {})
       }
       const error = failureForStatus(response.status, detail)
       const retryAfter = parseRetryAfterMs(response.headers.get('retry-after'))
@@ -307,7 +310,13 @@ export function createOpenAiSseTransport(
         else if (typeof parsed.msg === 'string') msg = parsed.msg
         else if (typeof parsed.message === 'string') msg = parsed.message
 
-        if (errObj?.code === 401 || errObj?.code === 'AUTH' || parsed.code === 401) {
+        if (
+          errObj?.code === 401 ||
+          errObj?.code === '401' ||
+          errObj?.code === 'AUTH' ||
+          parsed.code === 401 ||
+          parsed.code === '401'
+        ) {
           code = 'AUTH'
         }
       } catch {}
@@ -326,6 +335,11 @@ export function createOpenAiSseTransport(
       number,
       { blockIndex: number; id: string; name: string; args: string }
     >()
+    // Vendors that omit tool_call.index must not collapse parallel calls into
+    // slot 0. Anonymous calls get negative slots; a delta continues the last
+    // anonymous slot unless it carries a different id.
+    let anonymousSlots = 0
+    let lastAnonymous: number | null = null
 
     let latestUsage: TokenUsage | null = null
     let finishReasonKind: 'stop' | 'tool-calls' | 'max-tokens' = 'stop'
@@ -373,10 +387,14 @@ export function createOpenAiSseTransport(
             : typeof parsed.error.message === 'string'
               ? parsed.error.message
               : 'unknown error'
+        const rawCode = typeof parsed.error === 'object' ? parsed.error.code : undefined
+        // Some vendors stringify the HTTP status; classify it the same way.
         const explicitStatus =
-          typeof parsed.error === 'object' && typeof parsed.error.code === 'number'
-            ? parsed.error.code
-            : undefined
+          typeof rawCode === 'number'
+            ? rawCode
+            : typeof rawCode === 'string' && /^\d{3}$/.test(rawCode)
+              ? Number(rawCode)
+              : undefined
         const failure =
           explicitStatus !== undefined
             ? failureForStatus(explicitStatus, `: ${message}`)
@@ -448,7 +466,32 @@ export function createOpenAiSseTransport(
           sawVisible = true
           yield* closeActiveStreamBlock()
           for (const toolCall of delta.tool_calls) {
-            const tcIndex = toolCall.index ?? 0
+            let tcIndex: number
+            if (typeof toolCall.index === 'number') {
+              tcIndex = toolCall.index
+            } else {
+              // Continue the anonymous slot with the same id; a delta without
+              // id continues the most recent one; anything else opens a slot.
+              let match: number | null = null
+              if (toolCall.id) {
+                for (const [key, value] of toolCallMap) {
+                  if (key < 0 && value.id === toolCall.id) {
+                    match = key
+                    break
+                  }
+                }
+              }
+              if (match !== null) {
+                tcIndex = match
+                lastAnonymous = match
+              } else if (!toolCall.id && lastAnonymous !== null) {
+                tcIndex = lastAnonymous
+              } else {
+                anonymousSlots += 1
+                tcIndex = -anonymousSlots
+                lastAnonymous = tcIndex
+              }
+            }
             let state = toolCallMap.get(tcIndex)
             if (!state) {
               const blockIndex = nextBlockIndex++
@@ -497,43 +540,11 @@ export function createOpenAiSseTransport(
       return false
     }
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    try {
-      // [DONE] terminates the turn on its own: waiting for TCP EOF hangs the
-      // request whenever the vendor keeps the connection open.
-      readLoop: while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-
-        let newlineIdx = buffer.indexOf('\n')
-        while (newlineIdx !== -1) {
-          const rawLine = buffer.slice(0, newlineIdx).replace(/\r$/, '')
-          buffer = buffer.slice(newlineIdx + 1)
-          if (rawLine.startsWith('data:')) {
-            const isDone = yield* processSseDataLine(rawLine.slice(5))
-            if (isDone) {
-              buffer = ''
-              break readLoop
-            }
-          }
-          newlineIdx = buffer.indexOf('\n')
-        }
-      }
-
-      if (buffer.trim().length > 0) {
-        for (const line of buffer.split(/\r?\n/)) {
-          if (line.startsWith('data:')) {
-            const isDone = yield* processSseDataLine(line.slice(5))
-            if (isDone) break
-          }
-        }
-      }
-    } finally {
-      await reader.cancel().catch(() => {})
+    // [DONE] terminates the turn on its own: waiting for TCP EOF hangs the
+    // request whenever the vendor keeps the connection open. ssePayloads
+    // owns the reader and cancels it on break/throw.
+    for await (const payload of ssePayloads(response.body)) {
+      if (yield* processSseDataLine(payload)) break
     }
 
     yield* closeActiveStreamBlock()

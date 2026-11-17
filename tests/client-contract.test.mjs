@@ -83,3 +83,35 @@ test('package manifest declares matching open host compatibility ranges', () => 
     }
   }
 })
+
+test('the login poller recovers from an expired (404) login', () => {
+  assert.ok(clientSource.includes('class HttpError'), 'fetch errors carry no HTTP status')
+  assert.ok(
+    clientSource.includes("err instanceof HttpError && err.status === 404"),
+    'expired logins are not detected',
+  )
+  // The polling catch, cancel and code paths must all drop the dead slot.
+  const recoveries = [...clientSource.matchAll(/err instanceof HttpError && err\.status === 404/g)]
+  assert.ok(recoveries.length >= 3, `expected 3 recovery paths, found ${recoveries.length}`)
+})
+
+test('a successful sign-in still refreshes quota after the effect tears down', () => {
+  assert.equal(
+    clientSource.includes('if (!stopped) void refresh(true)'),
+    false,
+    'the post-login quota refresh is swallowed by the effect cleanup flag',
+  )
+})
+
+test('optimistic writes cannot starve the first quota refresh', () => {
+  assert.ok(clientSource.includes('quotaReadyRef.current'), 'quota readiness is not tracked')
+  assert.ok(clientSource.includes('const ensureQuota'), 'writes do not retry a discarded quota read')
+  const calls = [...clientSource.matchAll(/ensureQuota\(\)/g)]
+  assert.ok(calls.length >= 3, 'ensureQuota must run after each optimistic write path')
+})
+
+test('starting a sign-in on another channel cancels the dangling login', () => {
+  assert.ok(clientSource.includes('cancelDanglingLogin'), 'cross-channel logins overwrite the slot')
+  const calls = [...clientSource.matchAll(/await cancelDanglingLogin\(/g)]
+  assert.ok(calls.length >= 2, 'both browser and PAT sign-in must clear the old slot')
+})

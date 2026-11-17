@@ -40,6 +40,9 @@ function makeRes() {
     statusCode: 200,
     body: '',
     writeHead(status) {
+      // Mirror node:http: the first writeHead wins and later writes throw.
+      if (this.headersSent) throw new Error('ERR_HTTP_HEADERS_SENT')
+      this.headersSent = true
       this.statusCode = status
       return this
     },
@@ -119,9 +122,9 @@ function harness(existingAccounts = [], routeOptions = {}) {
   }
 }
 
-async function invoke(handler, method, path, body) {
+async function invoke(handler, method, path, body, extraHeaders = {}) {
   const res = makeRes()
-  handler(makeReq(method, path, body), res)
+  handler(makeReq(method, path, body, extraHeaders), res)
   for (let i = 0; i < 100 && !res.body; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
@@ -688,6 +691,67 @@ test('concurrent new-account logins reserve distinct accountIds', async () => {
     assert.deepEqual([a.json.login.accountId, b.json.login.accountId].sort(), ['acct-1', 'acct-2'])
   } finally {
     for (const r of resolvers) r()
+    cleanup()
+  }
+})
+
+test('a wrong-method request answers once with 405 and keeps the connection', async () => {
+  const { handler, cleanup } = harness()
+  try {
+    const refused = await invoke(handler, 'PUT', `${PREFIX}/state`)
+    assert.equal(refused.status, 405)
+    assert.equal(refused.json.error, 'method not allowed')
+
+    const alsoRefused = await invoke(handler, 'DELETE', `${PREFIX}/login/start`, {})
+    assert.equal(alsoRefused.status, 405)
+  } finally {
+    cleanup()
+  }
+})
+
+test('IPv6 loopback origins and hosts are accepted, rebinding hosts are not', async () => {
+  const { handler, cleanup } = harness()
+  try {
+    const ipv6Origin = await invoke(handler, 'GET', `${PREFIX}/state?quota=0`, undefined, {
+      origin: 'http://[::1]:5173',
+    })
+    assert.equal(ipv6Origin.status, 200)
+
+    const mappedHost = await invoke(handler, 'GET', `${PREFIX}/state?quota=0`, undefined, {
+      host: '[::ffff:127.0.0.1]:8080',
+    })
+    assert.equal(mappedHost.status, 200)
+
+    const rebinding = await invoke(handler, 'GET', `${PREFIX}/state?quota=0`, undefined, {
+      host: 'evil.example.com',
+    })
+    assert.equal(rebinding.status, 403)
+  } finally {
+    cleanup()
+  }
+})
+
+test('an over-long API key reports its own error, not "required"', async () => {
+  const { handler, cleanup } = harness()
+  try {
+    const tooLong = await invoke(handler, 'POST', `${PREFIX}/login/apikey`, {
+      channelId: descriptor.id,
+      method: 2,
+      accountId: 'acct-1',
+      key: 'x'.repeat(8193),
+    })
+    assert.equal(tooLong.status, 400)
+    assert.match(tooLong.json.error, /too long/)
+
+    const empty = await invoke(handler, 'POST', `${PREFIX}/login/apikey`, {
+      channelId: descriptor.id,
+      method: 2,
+      accountId: 'acct-1',
+      key: '   ',
+    })
+    assert.equal(empty.status, 400)
+    assert.match(empty.json.error, /required/)
+  } finally {
     cleanup()
   }
 })

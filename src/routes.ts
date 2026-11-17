@@ -91,6 +91,10 @@ export interface HitchfinRouteServices {
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  // A refused method already answered 405 and the dispatch keeps falling
+  // through to the final 404; writing twice throws ERR_HTTP_HEADERS_SENT and
+  // destroys the keep-alive connection. The first response wins.
+  if (res.headersSent) return
   const body = JSON.stringify(payload)
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -113,7 +117,10 @@ function isLoopbackHostname(hostname: string): boolean {
     value === 'localhost' ||
     value === 'localhost.' ||
     value === '::1' ||
-    value === '[::1]'
+    value === '[::1]' ||
+    // URL normalization renders the IPv4-mapped form as [::ffff:7f00:1].
+    value === '[::ffff:127.0.0.1]' ||
+    value === '[::ffff:7f00:1]'
   )
 }
 
@@ -175,9 +182,7 @@ function fenceRefused(ctx: HitchfinContext, req: IncomingMessage, res: ServerRes
   try {
     const originUrl = new URL(origin)
     if (
-      originUrl.hostname === '127.0.0.1' ||
-      originUrl.hostname === 'localhost' ||
-      originUrl.hostname === '::1' ||
+      isLoopbackHostname(originUrl.hostname) ||
       ['dsh:', 'app:', 'vscode-file:', 'vscode-webview:', 'file:'].includes(originUrl.protocol)
     ) {
       return false
@@ -1028,8 +1033,12 @@ export function registerHitchfinRoutes(
         return
       }
       const key = text(body.key).trim()
-      if (!key || key.length > 8192) {
+      if (!key) {
         sendJson(res, 400, { ok: false, error: 'API key is required' })
+        return
+      }
+      if (key.length > 8192) {
+        sendJson(res, 400, { ok: false, error: 'API key is too long (max 8192 characters)' })
         return
       }
       const parsedProxy = parseProxy(body.proxy)
@@ -1309,6 +1318,9 @@ export function registerHitchfinRoutes(
         sendJson(res, 404, { ok: false, error: 'unknown channel' })
         return
       }
+      // An explicit refresh is also the moment to notice a channel package
+      // installed since the process started.
+      registry.invalidatePackageCache()
       const loadInfo = registry.loadInfo(descriptor)
       if (!loadInfo) {
         sendJson(res, 409, { ok: false, error: 'channel package is not installed' })

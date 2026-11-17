@@ -57,6 +57,23 @@ export function accountKey(channelId: string, accountId: string): string {
   return `${SCOPE}/${channelId}-${accountId}`
 }
 
+/** Read/write paths must not build a credential key from unvalidated input. */
+function validAccountRef(channelId: string, accountId: string): boolean {
+  return KEY_SEGMENT_PATTERN.test(channelId) && isValidAccountId(accountId)
+}
+
+/**
+ * The worker relays `authChanged` from a channel package verbatim. Only a
+ * recognizable auth record may reach disk; a buggy or hostile package must
+ * not be able to overwrite an account's credentials with arbitrary garbage.
+ */
+function isPlausibleAuth(auth: unknown): boolean {
+  if (!auth || typeof auth !== 'object' || Array.isArray(auth)) return false
+  const record = auth as Record<string, unknown>
+  if (record.type === 'api') return typeof record.key === 'string' && record.key.trim() !== ''
+  return record.type === 'oauth' || record.type === 'success'
+}
+
 export function normalizeStoredAuth(auth: unknown): unknown {
   if (!auth || typeof auth !== 'object' || Array.isArray(auth)) return auth
   const record = auth as Record<string, unknown>
@@ -171,7 +188,7 @@ export class AccountStore {
   }
 
   async get(channelId: string, accountId: string): Promise<AccountPayload | undefined> {
-    if (!this.credentials) return undefined
+    if (!this.credentials || !validAccountRef(channelId, accountId)) return undefined
     const record = await this.credentials.readRecord(accountKey(channelId, accountId))
     return parsePayload(record)
   }
@@ -290,15 +307,38 @@ export class AccountStore {
       createdAt: payload.createdAt || now,
       updatedAt: now,
     }
-    await this.credentials.modifyRecord(accountKey(next.channelId, next.accountId), async () => ({
-      kind: 'grant',
-      payload: next,
-    }))
-    return next
+    // Sign-in can take minutes. Settings the user changed on disk during that
+    // window (freeOnly/proxy/hiddenModels/enabled/priority) must survive the
+    // write, so merge the fresh auth into the live record instead of
+    // overwriting it with the snapshot the flow started from.
+    const record = await this.credentials.modifyRecord(
+      accountKey(next.channelId, next.accountId),
+      async (current) => {
+        const existing = parsePayload(current)
+        if (!existing) return { kind: 'grant', payload: next }
+        const merged: AccountPayload = {
+          ...next,
+          plan: next.plan ?? existing.plan,
+          freeOnly: existing.freeOnly,
+          createdAt: existing.createdAt,
+        }
+        if (existing.hiddenModels) merged.hiddenModels = existing.hiddenModels
+        else delete merged.hiddenModels
+        if (existing.proxy) merged.proxy = existing.proxy
+        else delete merged.proxy
+        if (existing.enabled !== undefined) merged.enabled = existing.enabled
+        else delete merged.enabled
+        if (existing.priority !== undefined) merged.priority = existing.priority
+        else delete merged.priority
+        return { kind: 'grant', payload: merged }
+      },
+    )
+    return parsePayload(record ?? undefined) ?? next
   }
 
   async updateAuth(channelId: string, accountId: string, auth: AccountAuth): Promise<void> {
-    if (!this.credentials) return
+    if (!this.credentials || !validAccountRef(channelId, accountId)) return
+    if (!isPlausibleAuth(auth)) return
     await this.credentials.modifyRecord(accountKey(channelId, accountId), async (current) => {
       const existing = parsePayload(current)
       if (!existing) return undefined
@@ -322,7 +362,7 @@ export class AccountStore {
     accountId: string,
     mutate: (current: AccountPayload) => AccountPayload,
   ): Promise<void> {
-    if (!this.credentials) return
+    if (!this.credentials || !validAccountRef(channelId, accountId)) return
     await this.credentials.modifyRecord(accountKey(channelId, accountId), async (current) => {
       const existing = parsePayload(current)
       if (!existing) return undefined
@@ -334,7 +374,7 @@ export class AccountStore {
   }
 
   async delete(channelId: string, accountId: string): Promise<void> {
-    if (!this.credentials) return
+    if (!this.credentials || !validAccountRef(channelId, accountId)) return
     await this.credentials.deleteRecord(accountKey(channelId, accountId))
   }
 }

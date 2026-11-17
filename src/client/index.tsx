@@ -262,6 +262,15 @@ function cooldownLeft(until: number | undefined, now: number): string {
   return seconds % 60 ? `${minutes}m ${seconds % 60}s` : `${minutes}m`
 }
 
+class HttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message)
+  }
+}
+
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const method = init?.method?.toUpperCase() ?? 'GET'
   const needsJsonType = init?.body !== undefined || (method !== 'GET' && method !== 'HEAD')
@@ -274,7 +283,10 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
   })
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>
   if (!response.ok || body.ok === false) {
-    throw new Error(typeof body.error === 'string' ? body.error : `HTTP ${response.status}`)
+    throw new HttpError(
+      typeof body.error === 'string' ? body.error : `HTTP ${response.status}`,
+      response.status,
+    )
   }
   return body as T
 }
@@ -497,6 +509,7 @@ export function HitchfinSettings() {
   // on unmount. A slow quota=0 response used to overwrite a newer snapshot
   // (or an optimistic toggle), while stray timers kept setting state.
   const requestSeq = useRef(0)
+  const quotaReadyRef = useRef(false)
   const timers = useRef<Set<number>>(new Set())
 
   const schedule = (fn: () => void, ms: number): number => {
@@ -545,6 +558,13 @@ export function HitchfinSettings() {
     return () => window.clearInterval(timer)
   }, [channels])
 
+  // "Last used / resets today" labels must not freeze on a page left open;
+  // the cooldown ticker above only runs while a cooldown is active.
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
   useEffect(() => {
     const root = document.documentElement
     const media = window.matchMedia('(prefers-color-scheme: dark)')
@@ -588,8 +608,20 @@ export function HitchfinSettings() {
       if (seq !== requestSeq.current) return
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      if (seq === requestSeq.current && withQuota) setQuotaReady(true)
+      if (seq === requestSeq.current && withQuota) {
+        quotaReadyRef.current = true
+        setQuotaReady(true)
+      }
     }
+  }
+
+  // An optimistic write bumps requestSeq and can discard the first quota
+  // refresh; without a retry the "reading quota" spinner would stay forever.
+  const ensureQuota = () => {
+    if (quotaReadyRef.current) return
+    schedule(() => {
+      void refresh(true)
+    }, 350)
   }
 
   useEffect(() => {
@@ -626,12 +658,24 @@ export function HitchfinSettings() {
           setSecretError('')
           showToast('success', T('账号已连接', 'Account connected'))
           void refresh(false)
+          // The status change tears this effect down (stopped=true); the
+          // quota refresh must still run. Unmount clears owned timers.
           schedule(() => {
-            if (!stopped) void refresh(true)
+            void refresh(true)
           }, 350)
         }
       } catch (err) {
-        if (!stopped) setError(err instanceof Error ? err.message : String(err))
+        if (stopped) return
+        // The server drops the login record when its TTL expires. Without
+        // this exit the poller would 404 forever and loginPending would lock
+        // the channel until a page reload.
+        if (err instanceof HttpError && err.status === 404) {
+          setLogin(null)
+          setError('')
+          showToast('error', T('登录已过期，请重新发起。', 'Sign-in expired; start again.'))
+          return
+        }
+        setError(err instanceof Error ? err.message : String(err))
       }
     }, 1500)
     return () => {
@@ -768,6 +812,28 @@ export function HitchfinSettings() {
     void startLogin(target, method.index, accountId)
   }
 
+  // The UI holds a single login slot. Starting a sign-in on another channel
+  // must cancel the dangling one, or its worker session and reserved account
+  // id would hang until the server TTL with no way to cancel from the UI.
+  const cancelDanglingLogin = async (targetId: string) => {
+    if (
+      !login ||
+      login.channelId === targetId ||
+      (login.status !== 'pending' && login.status !== 'code')
+    ) {
+      return
+    }
+    try {
+      await json('/dsh-hitchfin/login/cancel', {
+        method: 'POST',
+        body: JSON.stringify({ id: login.id }),
+      })
+    } catch {
+      // Already gone server-side; dropping the slot is still correct.
+    }
+    setLogin(null)
+  }
+
   const startLogin = async (
     target: Channel,
     methodIndex: number,
@@ -777,6 +843,7 @@ export function HitchfinSettings() {
     setError('')
     setBusy(`start:${target.id}`)
     try {
+      await cancelDanglingLogin(target.id)
       const body = await json<{ login: Login }>('/dsh-hitchfin/login/start', {
         method: 'POST',
         body: JSON.stringify({
@@ -806,6 +873,7 @@ export function HitchfinSettings() {
     setBusy(`secret:${target.id}`)
     try {
       if (composeHere.secretKind === 'pat') {
+        await cancelDanglingLogin(target.id)
         const body = await json<{ login: Login }>('/dsh-hitchfin/login/start', {
           method: 'POST',
           body: JSON.stringify({
@@ -855,7 +923,14 @@ export function HitchfinSettings() {
       setLogin(body.login)
       setCode('')
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (err instanceof HttpError && err.status === 404) {
+        setLogin(null)
+        setCode('')
+        setError('')
+        showToast('error', T('登录已过期，请重新发起。', 'Sign-in expired; start again.'))
+      } else {
+        setError(err instanceof Error ? err.message : String(err))
+      }
     } finally {
       setBusy('')
     }
@@ -871,7 +946,12 @@ export function HitchfinSettings() {
       })
       setLogin(body.login)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (err instanceof HttpError && err.status === 404) {
+        setLogin(null)
+        setError('')
+      } else {
+        setError(err instanceof Error ? err.message : String(err))
+      }
     } finally {
       setBusy('')
     }
@@ -898,6 +978,7 @@ export function HitchfinSettings() {
         method: 'POST',
         body: JSON.stringify({ channelId: target.id, freeOnly: next }),
       })
+      ensureQuota()
     } catch (err) {
       setChannels((list) =>
         list
@@ -933,6 +1014,7 @@ export function HitchfinSettings() {
         method: 'POST',
         body: JSON.stringify({ channelId: target.id, hiddenModels: hidden }),
       })
+      ensureQuota()
       if (message) showToast('success', message)
     } catch (err) {
       setChannels((list) =>
@@ -1025,6 +1107,7 @@ export function HitchfinSettings() {
           accountIds: ordered.map((account) => account.accountId),
         }),
       })
+      ensureQuota()
     } catch (err) {
       setChannels(replace(previous))
       showToast('error', err instanceof Error ? err.message : String(err))
@@ -1121,6 +1204,7 @@ export function HitchfinSettings() {
   }
 
   const saveProxy = async (target: Channel, account: Account, value: string) => {
+    if (busy !== '') return
     const key = `${target.id}:${account.accountId}`
     setBusy(`proxy:${key}`)
     setProxyError('')
@@ -1881,7 +1965,7 @@ export function HitchfinSettings() {
                               if (proxyError) setProxyError('')
                             }}
                             onKeyDown={(event) => {
-                              if (event.key === 'Enter' && proxyDraft.trim() && !proxyBusy) {
+                              if (event.key === 'Enter' && proxyDraft.trim() && busy === '') {
                                 event.preventDefault()
                                 void saveProxy(channel, account, proxyDraft.trim())
                               }
@@ -1890,7 +1974,7 @@ export function HitchfinSettings() {
                           <button
                             type="button"
                             className="hf-btn primary"
-                            disabled={proxyBusy || !proxyDraft.trim()}
+                            disabled={busy !== '' || !proxyDraft.trim()}
                             onClick={() => void saveProxy(channel, account, proxyDraft.trim())}
                           >
                             {proxyBusy ? <span className="hf-spinner" /> : null}
@@ -1900,7 +1984,7 @@ export function HitchfinSettings() {
                             <button
                               type="button"
                               className="hf-btn"
-                              disabled={proxyBusy}
+                              disabled={busy !== ''}
                               onClick={() => {
                                 setProxyDraft('')
                                 void saveProxy(channel, account, '')

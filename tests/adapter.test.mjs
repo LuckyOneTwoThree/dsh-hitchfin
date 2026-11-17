@@ -697,3 +697,120 @@ test('buildAnthropicMessages infers media_type from data URI image strings', () 
     },
   ])
 })
+
+test('local backpressure neither cools the account nor spends failover budget', async () => {
+  let calls = 0
+  const worker = {
+    ...makeWorker(),
+    fetch: async () => {
+      calls += 1
+      if (calls === 1) throw new HitchfinError('buffer budget exceeded', 'BACKPRESSURE')
+      return sseResponse()
+    },
+  }
+  const adapter = makeAdapter({
+    accounts: makeAccounts([account('acct-1'), account('acct-2')]),
+    worker,
+  })
+  const options = {
+    provider: descriptor.providerId,
+    model: 'free-model',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+  }
+  const first = await collect(adapter.stream(options))
+  assert.equal(first.at(-1).type, 'finish')
+  assert.equal(first.at(-1).reason.kind, 'error')
+  assert.equal(first.at(-1).reason.failure.code, 'BACKPRESSURE')
+  // No failover: another account cannot fix a slow local consumer.
+  assert.equal(calls, 1)
+
+  // No cooldown either: the very next request uses an account immediately.
+  const second = await collect(adapter.stream(options))
+  assert.equal(second.at(-1).type, 'finish')
+  assert.equal(second.at(-1).reason.kind, 'stop')
+  assert.equal(calls, 2)
+})
+
+test('a throwing listing keeps the last complete catalog instead of emptying the picker', async () => {
+  let fail = false
+  const worker = {
+    ...makeWorker(),
+    models: async () => {
+      if (fail) throw new Error('accounts service exploded')
+      return makeWorker().models()
+    },
+  }
+  const adapter = makeAdapter({ accounts: makeAccounts([account('acct-1')]), worker })
+  const before = await adapter.listModels(descriptor.providerId)
+  assert.ok(before.length >= 1)
+
+  fail = true
+  adapter.invalidate(descriptor.providerId)
+  const after = await adapter.listModels(descriptor.providerId)
+  assert.deepEqual(after.map((m) => m.id).sort(), before.map((m) => m.id).sort())
+})
+
+test('protocol fallback after invalidate still routes claude models to Messages', async () => {
+  const { MESSAGES_URL } = await import('../lib/adapter/anthropic-sse.js')
+  const registryDescriptor = {
+    ...descriptor,
+    protocols: ['openai-completions', 'anthropic-messages'],
+  }
+  const urls = []
+  const encoder = new TextEncoder()
+  const anthropicBody = [
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"ok"}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ].join('')
+  let fail = false
+  const worker = {
+    models: async () => {
+      if (fail) throw new Error('listing down')
+      return [
+        {
+          id: 'claude-sonnet-5.5',
+          name: 'Claude Sonnet 5.5',
+          contextWindow: 200000,
+          input: ['text'],
+          efforts: [],
+          free: false,
+          freeKnown: true,
+        },
+      ]
+    },
+    fetch: async (url) => {
+      urls.push(url)
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(anthropicBody))
+            controller.close()
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      )
+    },
+  }
+  const adapter = makeAdapter({
+    accounts: makeAccounts([account('acct-1')]),
+    worker,
+    registryDescriptor,
+  })
+  await adapter.listModels(descriptor.providerId)
+  // Drop the protocol map, then make the live listing fail: the picker survives
+  // on lastGoodModels and the request must still pick the Messages shape.
+  adapter.invalidate(descriptor.providerId)
+  fail = true
+  const chunks = await collect(
+    adapter.stream({
+      provider: descriptor.providerId,
+      model: 'claude-sonnet-5.5',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    }),
+  )
+  assert.equal(urls[0], MESSAGES_URL)
+  assert.equal(chunks.at(-1).type, 'finish')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})

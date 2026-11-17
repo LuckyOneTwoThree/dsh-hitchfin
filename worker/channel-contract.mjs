@@ -138,6 +138,10 @@ export function redactError(error) {
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[redacted]')
     .replace(/\b(?:sk|pk|jt|pt)-[A-Za-z0-9._-]{8,}/g, '[redacted]')
     .replace(/([?&](?:token|key|api_key|access_token|signature|sig)=)[^&\s]+/gi, '$1[redacted]')
+    // Bare JWTs (three base64url segments starting with eyJ) and proxy URLs
+    // with embedded userinfo never belong in a log line or a /state error.
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, '[redacted]')
+    .replace(/(https?:\/\/)[^/@\s:]+:[^/@\s]+@/gi, '$1[redacted]@')
     .slice(0, 300)
 }
 

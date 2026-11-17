@@ -48,6 +48,8 @@ const SLOP_MS = 1_000
 
 for (const src of srcFiles) {
   if (src.endsWith('.tsx')) continue
+  // The client ships as the esbuild bundle (checked below), not as tsc output.
+  if (relative(srcDir, src).startsWith(`client${process.platform === 'win32' ? '\\' : '/'}`)) continue
   const out = join(libDir, relative(srcDir, src).replace(/\.ts$/, '.js'))
   if (!existsSync(out)) {
     throw new Error(`dsh-hitchfin: ${relative(root, src)} has no compiled output. ${hint}`)

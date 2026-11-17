@@ -111,6 +111,7 @@ interface StreamState {
   ended: boolean
   cleanup?: () => void
   idleTimer?: NodeJS.Timeout
+  startedAt: number
 }
 
 export interface ChannelWorkerHostOptions {
@@ -131,6 +132,12 @@ const AUTH_CALL_TIMEOUT_MS = 15 * 60_000
 const AUTH_SESSION_TTL_MS = 10 * 60_000
 /** A stalled vendor connection must not hold a turn open forever. */
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000
+/**
+ * The idle watchdog resets on every chunk, so a vendor that only sends
+ * keep-alive comments could hold a turn open forever. Cap the total lifetime
+ * of one response body as well.
+ */
+const MAX_STREAM_LIFETIME_MS = 30 * 60_000
 /**
  * Cap on bytes a single response may queue ahead of its consumer. The worker
  * pushes chunks without waiting for an ack; a slow consumer would otherwise
@@ -321,6 +328,10 @@ export class ChannelWorkerHost {
     const stream = this.streams.get(id)
     if (stream) {
       if (message.type === 'head') {
+        // A duplicate head would orphan the first Response body: its
+        // controller is replaced and the consumer awaits a stream that never
+        // closes nor errors.
+        if (stream.headSettled) return
         stream.headSettled = true
         this.armStreamIdle(id, stream)
         const status = typeof message.status === 'number' ? message.status : 200
@@ -671,7 +682,9 @@ export class ChannelWorkerHost {
   private armStreamIdle(id: number, stream: StreamState): void {
     this.clearStreamIdle(stream)
     if (this.disposed || this.streamIdleTimeoutMs <= 0) return
-    stream.idleTimer = setTimeout(() => this.timeoutStream(id, stream), this.streamIdleTimeoutMs)
+    const lifetimeLeft = stream.startedAt + MAX_STREAM_LIFETIME_MS - Date.now()
+    const delay = Math.min(this.streamIdleTimeoutMs, Math.max(0, lifetimeLeft))
+    stream.idleTimer = setTimeout(() => this.timeoutStream(id, stream), delay)
     stream.idleTimer.unref?.()
   }
 
@@ -691,8 +704,11 @@ export class ChannelWorkerHost {
     } catch {
       // The worker is already gone; the consumer still needs the timeout.
     }
+    const lifetimeExceeded = Date.now() >= stream.startedAt + MAX_STREAM_LIFETIME_MS
     const error = new HitchfinError(
-      `channel stream idle for ${this.streamIdleTimeoutMs}ms`,
+      lifetimeExceeded
+        ? `channel stream exceeded the ${MAX_STREAM_LIFETIME_MS}ms lifetime cap`
+        : `channel stream idle for ${this.streamIdleTimeoutMs}ms`,
       'TIMEOUT',
     )
     if (stream.headSettled) {
@@ -720,7 +736,9 @@ export class ChannelWorkerHost {
     }
     const error = new HitchfinError(
       `channel stream exceeded ${MAX_STREAM_BUFFER_BYTES} bytes of buffering`,
-      'CHANNEL_ERROR',
+      // Local consumer backpressure, not an account failure: cooling the
+      // account or failing over would punish a healthy upstream.
+      'BACKPRESSURE',
     )
     if (stream.headSettled) {
       try {
@@ -769,6 +787,7 @@ export class ChannelWorkerHost {
         queued: [],
         queuedBytes: 0,
         ended: false,
+        startedAt: Date.now(),
       }
       this.streams.set(id, state)
       this.armStreamIdle(id, state)

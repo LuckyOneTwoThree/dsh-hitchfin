@@ -86,7 +86,13 @@ const COOLDOWN_MS: Readonly<Record<string, number>> = {
  * Failures that no other account can fix, or that carry their own recovery:
  * cooling them would keep a healthy account out of rotation for no reason.
  */
-const NO_COOLDOWN = new Set(['ABORTED', 'WORKER_STOPPED', 'INVALID_REQUEST', 'UNSUPPORTED_CONTENT'])
+const NO_COOLDOWN = new Set([
+  'ABORTED',
+  'WORKER_STOPPED',
+  'INVALID_REQUEST',
+  'UNSUPPORTED_CONTENT',
+  'BACKPRESSURE',
+])
 
 /** An unlisted code still means "this account just failed": cool it briefly. */
 const DEFAULT_COOLDOWN_MS = 60_000
@@ -405,7 +411,13 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
     if (!this.protocols.has(key) || expired || (incomplete && mayRelist)) {
       await this.listModels(provider)
     }
-    return this.protocols.get(key) ?? 'openai-completions'
+    const known = this.protocols.get(key)
+    if (known) return known
+    // The protocol map can be empty after invalidate() while lastGoodModels
+    // keeps the picker alive; apply the same claude- heuristic the listing
+    // uses instead of sending a Messages model to chat/completions.
+    const descriptor = this.options.registry.get(provider)
+    return selectTransportProtocol(descriptor ?? { protocols: [] }, { id: model })
   }
 
   private coolingFailure(
@@ -629,7 +641,9 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
       this.options.logger.warn(
         `dsh-hitchfin: listing models for ${descriptor.displayName} failed: ${errorMessage(error)}`,
       )
-      return []
+      // Same rule as an incomplete live read: a transient failure must not
+      // empty the picker when a complete catalog was seen before.
+      return this.lastGoodModels.get(provider) ?? []
     }
   }
 
@@ -904,8 +918,13 @@ export class HitchfinAdapter implements HitchfinLlmAdapter {
           return
         }
         // A request the provider considers malformed will be rejected the same
-        // way by every account; do not spend the failover budget on it.
-        if (failure.code === 'INVALID_REQUEST' || failure.code === 'UNSUPPORTED_CONTENT') {
+        // way by every account; do not spend the failover budget on it. Local
+        // backpressure is the consumer's problem, not another account's fix.
+        if (
+          failure.code === 'INVALID_REQUEST' ||
+          failure.code === 'UNSUPPORTED_CONTENT' ||
+          failure.code === 'BACKPRESSURE'
+        ) {
           yield { type: 'finish', reason: { kind: 'error', failure } }
           return
         }

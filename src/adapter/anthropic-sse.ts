@@ -1,4 +1,5 @@
 import { HitchfinError } from '../errors.js'
+import { ssePayloads } from './protocol.js'
 import type {
   RequestContentBlock,
   RequestMessage,
@@ -273,6 +274,9 @@ async function responseDetail(response: Response): Promise<string> {
       return `: ${text.slice(0, 300)}`
     }
   } catch {
+    // The body is diagnostic only; drop it so the worker-side stream and its
+    // abort listener do not linger until the idle watchdog fires.
+    void response.body?.cancel().catch(() => {})
     return ''
   }
 }
@@ -334,6 +338,7 @@ export function createAnthropicSseTransport(
     let cacheReadTokens = 0
     let cacheWriteTokens = 0
     let finishReasonKind: 'stop' | 'tool-calls' | 'max-tokens' = 'stop'
+    let sawVisible = false
 
     const closeBlock = function* (index: number): Generator<StreamChunk, void, unknown> {
       const state = blocks.get(index)
@@ -358,7 +363,9 @@ export function createAnthropicSseTransport(
             arguments: state.args || '{}',
           },
         }
-        finishReasonKind = 'tool-calls'
+        // A max_tokens stop reported by message_delta must survive the EOF
+        // fallback close of a truncated tool_use block (mirrors openai-sse).
+        if (finishReasonKind === 'stop') finishReasonKind = 'tool-calls'
       }
     }
 
@@ -408,6 +415,7 @@ export function createAnthropicSseTransport(
             blockType: kind === 'tool-call' ? 'tool-call' : kind,
           }
           if (kind === 'tool-call') {
+            sawVisible = true
             yield {
               type: 'tool-call-delta',
               index: state.chunkIndex,
@@ -418,6 +426,7 @@ export function createAnthropicSseTransport(
           } else if (rawType === 'text' && typeof event.content_block?.text === 'string') {
             state.text += event.content_block.text
             if (event.content_block.text.length > 0) {
+              sawVisible = true
               yield {
                 type: 'text-delta',
                 index: state.chunkIndex,
@@ -437,12 +446,15 @@ export function createAnthropicSseTransport(
           const partialJson = delta?.partial_json ?? ''
           if (state.kind === 'text' && text) {
             state.text += text
+            sawVisible = true
             yield { type: 'text-delta', index: state.chunkIndex, text }
           } else if (state.kind === 'reasoning' && thinking) {
             state.text += thinking
+            sawVisible = true
             yield { type: 'reasoning-delta', index: state.chunkIndex, text: thinking }
           } else if (state.kind === 'tool-call' && partialJson) {
             state.args += partialJson
+            sawVisible = true
             yield {
               type: 'tool-call-delta',
               index: state.chunkIndex,
@@ -468,43 +480,27 @@ export function createAnthropicSseTransport(
           return true
         case 'error': {
           const code = errorCodeFor(event.error?.type)
-          throw new HitchfinError(
+          const failure = new HitchfinError(
             `channel stream error: ${event.error?.message ?? 'unknown error'}`,
             code,
           )
+          // Account-scoped failures must still surface after content so the
+          // account cools down; a generic trailing error after a complete
+          // answer must not turn the successful turn into a failure.
+          const accountScoped = code === 'AUTH' || code === 'QUOTA' || code === 'RATE_LIMIT'
+          if (!sawVisible || accountScoped) throw failure
+          return false
         }
         default:
           return false
       }
     }
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    try {
-      // message_stop ends the turn on its own: waiting for TCP EOF hangs the
-      // request whenever the vendor keeps the connection open.
-      readLoop: while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        let newlineIdx = buffer.indexOf('\n')
-        while (newlineIdx !== -1) {
-          const rawLine = buffer.slice(0, newlineIdx).replace(/\r$/, '')
-          buffer = buffer.slice(newlineIdx + 1)
-          if (rawLine.startsWith('data:')) {
-            if (yield* processEvent(rawLine.slice(5))) break readLoop
-          }
-          newlineIdx = buffer.indexOf('\n')
-        }
-      }
-      if (buffer.trim().length > 0) {
-        for (const line of buffer.split(/\r?\n/)) {
-          if (line.startsWith('data:')) yield* processEvent(line.slice(5))
-        }
-      }
-    } finally {
-      await reader.cancel().catch(() => {})
+    // message_stop ends the turn on its own: waiting for TCP EOF hangs the
+    // request whenever the vendor keeps the connection open. ssePayloads
+    // owns the reader and cancels it on break/throw.
+    for await (const payload of ssePayloads(response.body)) {
+      if (yield* processEvent(payload)) break
     }
 
     for (const index of [...blocks.keys()]) yield* closeBlock(index)

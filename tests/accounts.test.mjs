@@ -181,3 +181,96 @@ test('channel-wide settings still apply when every account is disabled', async (
   assert.equal(accounts.every((entry) => entry.hiddenModels?.includes('paid-model')), true)
   assert.equal(accounts.every((entry) => entry.enabled === false), true)
 })
+
+test('save merges fresh auth into the live record instead of a stale snapshot', async () => {
+  const store = new AccountStore(fakeCredentials())
+  const snapshot = await store.save(account('acct-1'))
+
+  // The user edits settings while a browser sign-in started from `snapshot`
+  // is still open.
+  await store.setFreeOnly('workbuddy-cn', 'acct-1', false)
+  await store.setProxy('workbuddy-cn', 'acct-1', 'http://127.0.0.1:7890')
+  await store.setHiddenModels('workbuddy-cn', 'acct-1', ['paid-model'])
+  await store.setEnabled('workbuddy-cn', 'acct-1', false)
+  await store.setPriorities('workbuddy-cn', ['acct-1'])
+
+  // The sign-in completes minutes later with the old snapshot but new auth.
+  const merged = await store.save({
+    ...snapshot,
+    auth: { type: 'oauth', access: 'fresh-token', accountId: 'user-acct-1' },
+  })
+
+  assert.equal(merged.auth.access, 'fresh-token')
+  assert.equal(merged.freeOnly, false)
+  assert.equal(merged.proxy, 'http://127.0.0.1:7890')
+  assert.deepEqual(merged.hiddenModels, ['paid-model'])
+  assert.equal(merged.enabled, false)
+  assert.equal(merged.priority, 0)
+  assert.equal(merged.createdAt, snapshot.createdAt)
+
+  const stored = await store.get('workbuddy-cn', 'acct-1')
+  assert.equal(stored.freeOnly, false)
+  assert.equal(stored.proxy, 'http://127.0.0.1:7890')
+  assert.equal(stored.auth.access, 'fresh-token')
+})
+
+test('save clears settings the user removed during the sign-in window', async () => {
+  const store = new AccountStore(fakeCredentials())
+  const snapshot = await store.save(
+    account('acct-1', { proxy: 'http://127.0.0.1:7890', hiddenModels: ['paid-model'] }),
+  )
+  await store.setProxy('workbuddy-cn', 'acct-1', '')
+  await store.setHiddenModels('workbuddy-cn', 'acct-1', [])
+
+  const merged = await store.save({ ...snapshot, auth: { type: 'oauth', access: 'fresh' } })
+  assert.equal(merged.proxy, undefined)
+  // An empty hidden list is stored as an empty array, not resurrected.
+  assert.deepEqual(merged.hiddenModels, [])
+})
+
+test('save still creates a brand-new account from the payload', async () => {
+  const store = new AccountStore(fakeCredentials())
+  const created = await store.save(
+    account('acct-9', { freeOnly: false, proxy: 'http://127.0.0.1:1080', enabled: true }),
+  )
+  assert.equal(created.freeOnly, false)
+  assert.equal(created.proxy, 'http://127.0.0.1:1080')
+  assert.equal(created.enabled, true)
+})
+
+test('updateAuth refuses garbage from a channel package', async () => {
+  const store = new AccountStore(fakeCredentials())
+  await store.save(account('acct-1'))
+  const before = await store.get('workbuddy-cn', 'acct-1')
+
+  for (const garbage of [null, 'token', 42, [], { type: 'bogus' }, { type: 'api', key: '' }]) {
+    await store.updateAuth('workbuddy-cn', 'acct-1', garbage)
+    const after = await store.get('workbuddy-cn', 'acct-1')
+    assert.deepEqual(after.auth, before.auth)
+  }
+
+  await store.updateAuth('workbuddy-cn', 'acct-1', {
+    type: 'success',
+    refresh: 'r2',
+    access: 'a2',
+  })
+  const refreshed = await store.get('workbuddy-cn', 'acct-1')
+  assert.equal(refreshed.auth.type, 'oauth')
+  assert.equal(refreshed.auth.access, 'a2')
+  // Settings survive an auth refresh.
+  assert.equal(refreshed.freeOnly, before.freeOnly)
+})
+
+test('read and delete paths ignore malformed account ids', async () => {
+  const credentials = fakeCredentials()
+  const store = new AccountStore(credentials)
+  await store.save(account('acct-1'))
+
+  assert.equal(await store.get('workbuddy-cn', '../x'), undefined)
+  await store.delete('workbuddy-cn', '../x')
+  await store.updateAuth('workbuddy-cn', '../x', { type: 'oauth', access: 'evil' })
+  await store.setFreeOnly('workbuddy-cn', '../x', false)
+
+  assert.deepEqual([...credentials.records.keys()], ['dsh-hitchfin/workbuddy-cn-acct-1'])
+  assert.equal((await store.get('workbuddy-cn', 'acct-1')).freeOnly, true)
+})
